@@ -14,6 +14,8 @@ import os
 import subprocess
 import platform
 import requests
+import json
+import urllib
 
 # ================================
 # Config
@@ -43,6 +45,9 @@ CHANNEL_POSITIONS = {
     "AF8":  ( 0.55,  0.75),
     "TP10": ( 0.72, -0.28),
 }
+
+
+state = 1
 
 # ================================
 # Shared frame state
@@ -195,6 +200,26 @@ class MJPEGHandler(BaseHTTPRequestHandler):
             self.send_header('Content-Type', 'text/html')
             self.end_headers()
             self.wfile.write(html)
+
+        elif self.path.startswith('/changestate'):
+            query = urllib.parse.urlparse(self.path).query
+            params = urllib.parse.parse_qs(query)
+            try:
+                new_state = int(params.get('state', [None])[0])
+                if new_state in (0, 1):
+                    global state
+                    state = new_state
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'application/json')
+                    self.send_header('Access-Control-Allow-Origin', '*')
+                    self.end_headers()
+                    self.wfile.write(json.dumps({'state': state}).encode())
+                else:
+                    self.send_response(400)
+                    self.end_headers()
+            except (TypeError, ValueError):
+                self.send_response(400)
+                self.end_headers()
 
         else:
             self.send_response(404)
@@ -368,17 +393,18 @@ def main():
         if majority_prediction == 0:
             print(f"  [IDLE] No action.")
             requests.post("http://localhost:8765", data={state:0})
-        elif majority_prediction == 1:
-            click("left")
-            requests.post("http://localhost:8765", data={state:0})
-            last_action_time = now
-        elif majority_prediction == 2:
-            click("right")
-            requests.post("http://localhost:8765", data={state:0})
-            last_action_time = now
-        elif majority_prediction == 3:
-            requests.post("http://localhost:8765", data={state:1})
-            last_action_time = now
+        if state:
+            if majority_prediction == 1:
+                click("left")
+                requests.post("http://localhost:8765", data={state:0})
+                last_action_time = now
+            elif majority_prediction == 2:
+                click("right")
+                requests.post("http://localhost:8765", data={state:0})
+                last_action_time = now
+            elif majority_prediction == 3:
+                requests.post("http://localhost:8765", data={state:1})
+                last_action_time = now
 
         # Reset debounce after firing so next action requires fresh agreement
         consecutive_count  = 0
