@@ -807,9 +807,9 @@ class EyeTrackerVisualization:
         a = float(np.dot(wv, u) / u_len2)
         b = float(np.dot(wv, v) / v_len2)
         if 0.0 <= a <= 1.0 and 0.0 <= b <= 1.0:
-            if self.owner.args.invert_gaze_x:
+            if self.owner.args.invert_gaze_x or self.owner.args.legacy_3d_invert_both:
                 a = 1.0 - a
-            if self.owner.args.invert_gaze_y:
+            if self.owner.args.invert_gaze_y or self.owner.args.legacy_3d_invert_both:
                 b = 1.0 - b
 
             self.owner.gaze_markers.append((a, b))

@@ -86,6 +86,22 @@ class EyeTrackerService:
             float(getattr(args, "cursor_max_speed_px_s", 900.0))
             * max(1.0, float(getattr(args, "cursor_gain", 1.0))),
         )
+        self._cursor_ramp_deadzone_px = max(
+            0.0,
+            float(getattr(args, "cursor_ramp_deadzone_px", 8.0)),
+        )
+        self._cursor_ramp_full_speed_px = max(
+            self._cursor_ramp_deadzone_px + 1.0,
+            float(getattr(args, "cursor_ramp_full_speed_px", 140.0)),
+        )
+        self._cursor_ramp_min_scale = min(
+            1.0,
+            max(0.0, float(getattr(args, "cursor_ramp_min_scale", 0.18))),
+        )
+        self._cursor_ramp_min_step_px = max(
+            0.0,
+            float(getattr(args, "cursor_ramp_min_step_px", 0.0)),
+        )
         self._last_target_ts = None
         self._raw_target_queue: deque[tuple[float, float]] = deque(maxlen=5)
         self._last_eye_norm: tuple[float, float] = (0.5, 0.5)
@@ -219,13 +235,23 @@ class EyeTrackerService:
 
         dt = max(1.0 / 240.0, min(0.25, now_s - prev_t))
         self._last_target_ts = now_s
-        max_jump = max(1.0, self._target_max_speed_px_s * dt)
-        if self._target_jump_limit_px > 0:
-            max_jump = min(max_jump, float(self._target_jump_limit_px))
 
         dx = float(x - prev_x)
         dy = float(y - prev_y)
         dist = math.hypot(dx, dy)
+        ramp_scale = self._ramp_scale(dist)
+        if ramp_scale <= 0.0:
+            self._stabilized_target = [prev_x, prev_y]
+            return int(round(prev_x)), int(round(prev_y))
+
+        max_jump = max(
+            1.0,
+            self._target_max_speed_px_s * dt * ramp_scale,
+        )
+        max_jump = max(self._cursor_ramp_min_step_px, max_jump)
+        if self._target_jump_limit_px > 0:
+            max_jump = min(max_jump, float(self._target_jump_limit_px))
+
         if dist > max_jump:
             scale = max_jump / max(1e-9, dist)
             x = prev_x + dx * scale
@@ -234,6 +260,22 @@ class EyeTrackerService:
         y = max(0.0, min(float(self.monitor_height - 1), y))
         self._stabilized_target = [x, y]
         return int(round(x)), int(round(y))
+
+    def _ramp_scale(self, distance: float) -> float:
+        if distance <= self._cursor_ramp_deadzone_px:
+            return 0.0
+        if distance >= self._cursor_ramp_full_speed_px:
+            return 1.0
+
+        span = max(1e-6, self._cursor_ramp_full_speed_px - self._cursor_ramp_deadzone_px)
+        if span <= 0:
+            return 1.0
+
+        t = (distance - self._cursor_ramp_deadzone_px) / span
+        t = max(0.0, min(1.0, t))
+        # Cubic smoothstep gives a gentle ease-in curve for small corrections.
+        smoothstep = t * t * (3.0 - 2.0 * t)
+        return self._cursor_ramp_min_scale + (1.0 - self._cursor_ramp_min_scale) * smoothstep
 
     def _run_face_mesh(self, frame_rgb: np.ndarray) -> Any:
         return self.face_mesh_backend.run_face_mesh(frame_rgb)
@@ -907,7 +949,12 @@ class EyeTrackerService:
                     self.mouse_position = [target_x, target_y]
                     self._emit_gaze(target_x, target_y, 0.98)
                     if self.mouse_control_enabled:
-                        self._move_cursor(target_x, target_y)
+                        smoothed_x, smoothed_y = self._clamp_jump(
+                            float(target_x),
+                            float(target_y),
+                            ts,
+                        )
+                        self._move_cursor(smoothed_x, smoothed_y)
                     else:
                         self._log_gaze_cursor_trace(
                             target_x,
@@ -1206,7 +1253,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--legacy-3d-invert-both",
         action=argparse.BooleanOptionalAction,
-        default=False,
+        default=True,
         help="Flip both axes in legacy_3d mapping (complete mirror correction).",
     )
     parser.add_argument(
@@ -1275,6 +1322,30 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=900.0,
         help="Maximum allowed cursor jump speed in px/s before hard limiting.",
+    )
+    parser.add_argument(
+        "--cursor-ramp-deadzone-px",
+        type=float,
+        default=8.0,
+        help="Distance (px) below which micro target changes are ignored.",
+    )
+    parser.add_argument(
+        "--cursor-ramp-full-speed-px",
+        type=float,
+        default=140.0,
+        help="Distance (px) where ramped speed reaches full configured max speed.",
+    )
+    parser.add_argument(
+        "--cursor-ramp-min-scale",
+        type=float,
+        default=0.18,
+        help="Minimum speed scale used inside the ramp start zone.",
+    )
+    parser.add_argument(
+        "--cursor-ramp-min-step-px",
+        type=float,
+        default=0.0,
+        help="Optional minimum clamp step to avoid near-stop micro updates.",
     )
     parser.add_argument(
         "--face-landmarker-task",
