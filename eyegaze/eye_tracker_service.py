@@ -328,9 +328,9 @@ class EyeTrackerService:
         if not (0.0 <= a <= 1.0 and 0.0 <= b <= 1.0):
             return None
 
-        if self.args.invert_gaze_x:
+        if self.args.invert_gaze_x or self.args.legacy_3d_invert_both:
             a = 1.0 - a
-        if self.args.invert_gaze_y:
+        if self.args.invert_gaze_y or self.args.legacy_3d_invert_both:
             b = 1.0 - b
 
         sx = int(round(np.clip(a, 0.0, 1.0) * max(0, self.monitor_width - 1)))
@@ -685,6 +685,7 @@ class EyeTrackerService:
             "[Tracker] Eye tracker running. Press Q or - to quit | "
             f"invert_x={'on' if self.args.invert_gaze_x else 'off'}, "
             f"invert_y={'on' if self.args.invert_gaze_y else 'off'} | "
+            f"legacy_3d_invert_both={'on' if self.args.legacy_3d_invert_both else 'off'} | "
             f"cursor_mode={self.args.cursor_mode}"
         )
 
@@ -1202,6 +1203,12 @@ def parse_args() -> argparse.Namespace:
         help="Invert gaze X direction. Use this only if movement is mirrored.",
     )
     parser.add_argument("--invert-gaze-y", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument(
+        "--legacy-3d-invert-both",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Flip both axes in legacy_3d mapping (complete mirror correction).",
+    )
     parser.add_argument(
         "--cursor-mode",
         choices=["iris_direct", "feature_mapper", "legacy_3d"],

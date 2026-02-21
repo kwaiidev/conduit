@@ -323,6 +323,9 @@ class GazeProcessingService:
             yaw_deg = -yaw_deg
         if self.owner.args.invert_gaze_y:
             pitch_deg = -pitch_deg
+        if self.owner.args.legacy_3d_invert_both:
+            yaw_deg = -yaw_deg
+            pitch_deg = -pitch_deg
 
         yaw_span = max(1e-6, float(self.owner._legacy_yaw_span_dynamic))
         pitch_span = max(1e-6, float(self.owner._legacy_pitch_span_dynamic))

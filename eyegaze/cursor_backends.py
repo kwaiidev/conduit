@@ -61,8 +61,9 @@ class CursorBackendManager:
         if self._is_darwin():
             move_fn = self._make_darwin_cursor_move()
             if move_fn is not None:
-                # CoreGraphics fallback: keep available when other toolkits are blocked.
-                _add("coregraphics", {"type": "coregraphics", "move": move_fn, "read": True})
+                # CoreGraphics uses native coordinate transforms that can mismatch with
+                # PyAutoGUI readback; keep only as a non-readable fallback.
+                _add("coregraphics", {"type": "coregraphics", "move": move_fn, "read": False})
 
         if self._is_windows():
             move_fn = self._make_win32_cursor_move()
