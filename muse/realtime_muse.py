@@ -31,7 +31,7 @@ VOTE_BUFFER_SIZE      = 5
 CONSECUTIVE_THRESHOLD = 3
 
 # Minimum confidence to act on a prediction (0–1)
-MIN_CONFIDENCE        = 0.65
+MIN_CONFIDENCE        = 0.4
 
 # Cooldown between actions in seconds (prevents rapid-fire clicks)
 ACTION_COOLDOWN       = 1.0
