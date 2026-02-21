@@ -1,107 +1,218 @@
-import React, { useState } from 'react';
-import { motion, AnimatePresence } from 'motion/react';
-import { 
-  Mic, 
-  MicOff, 
-  Keyboard, 
-  Zap, 
-  Play, 
-  Settings, 
-  Power,
-  ChevronRight,
-  Info
-} from 'lucide-react';
-import { useNavigate } from 'react-router-dom';
+import React, { useState, useEffect } from "react";
+import { useNavigate } from "react-router-dom";
+import { Home, Settings, Users, Minimize2, Maximize2, Minus, Square, X, Sun, Moon } from "lucide-react";
+import { useTheme } from "../context/ThemeContext";
 
 export default function CompactToolbar() {
   const navigate = useNavigate();
-  const [leftJaw, setLeftJaw] = useState(true);
-  const [rightJaw, setRightJaw] = useState(true);
-  const [bothJaws, setBothJaws] = useState(false);
-  const [voiceActive, setVoiceActive] = useState(false);
-  const [isHovered, setIsHovered] = useState(false);
-  const [isPassive, setIsPassive] = useState(true);
+  const { isDark, toggleTheme } = useTheme();
+  const [isOverlay, setIsOverlay] = useState(false);
+
+  useEffect(() => {
+    // Get initial overlay mode
+    window.electron?.getOverlayMode().then(setIsOverlay);
+
+    // Listen for mode changes
+    window.electron?.onOverlayModeChanged?.((mode) => {
+      setIsOverlay(mode);
+    });
+  }, []);
+
+  const toggleOverlay = async () => {
+    const newMode = await window.electron?.toggleOverlay();
+    if (newMode !== undefined) {
+      setIsOverlay(newMode);
+    }
+  };
 
   return (
-    <motion.div 
-      layout
-      className="relative bg-white/80 dark:bg-[#121218]/90 backdrop-blur-3xl border border-slate-200 dark:border-white/10 rounded-[40px] shadow-2xl flex items-center p-2 gap-2"
+    <div
+      className="app-title-bar"
+      style={{
+        ...styles.toolbar,
+        background: "var(--toolbar-bg)",
+        borderBottomColor: "var(--toolbar-border)",
+      }}
     >
-      {/* Signal Status */}
-      <div className="flex items-center gap-3 px-6 py-4 border-r border-slate-100 dark:border-white/5">
-        <Zap size={20} className="text-[#FF2D8D] fill-[#FF2D8D]/20" />
-        <div className="flex flex-col">
-          <span className="text-[10px] font-bold uppercase tracking-widest text-slate-400 dark:text-white/40">Signal</span>
-          <span className="text-sm font-black text-slate-900 dark:text-white">94%</span>
-        </div>
+      <div style={styles.left} className="app-drag-region">
+        <span style={{ ...styles.logo, color: "var(--toolbar-text)" }}>Conduit</span>
       </div>
 
-      {/* EEG Jaw Controls */}
-      <div className="flex items-center gap-1.5 px-3">
-        <div className="flex items-center gap-1 bg-slate-50 dark:bg-white/5 p-1 rounded-3xl">
-          <ToolbarButton active={leftJaw} onClick={() => setLeftJaw(!leftJaw)} label="L-Jaw" icon="L" />
-          <ToolbarButton active={bothJaws} onClick={() => setBothJaws(!bothJaws)} label="M-Jaw" icon="M" />
-          <ToolbarButton active={rightJaw} onClick={() => setRightJaw(!rightJaw)} label="R-Jaw" icon="R" />
-        </div>
-
-        <div className="w-px h-8 bg-slate-100 dark:bg-white/5 mx-1" />
-
-        <ToolbarButton 
-          active={voiceActive} 
-          onClick={() => setVoiceActive(!voiceActive)} 
-          label="Voice" 
-          icon={voiceActive ? <Mic size={18} /> : <MicOff size={18} />}
-          color="blue"
+      <div style={styles.center} className="app-drag-region">
+        <ToolbarButton
+          active={false}
+          onClick={() => navigate("/home")}
+          label="Home"
+          icon={Home}
+        />
+        <ToolbarButton
+          active={false}
+          onClick={() => navigate("/users")}
+          label="Users"
+          icon={Users}
+        />
+        <ToolbarButton
+          active={false}
+          onClick={() => navigate("/settings")}
+          label="Settings"
+          icon={Settings}
         />
       </div>
 
-      {/* Safety Mode Toggle */}
-      <button 
-        onClick={() => setIsPassive(!isPassive)}
-        className={`px-4 py-2 rounded-2xl flex items-center gap-2 transition-all border ${
-          isPassive ? 'bg-amber-500/10 border-amber-500/20 text-amber-600' : 'bg-emerald-500/10 border-emerald-500/20 text-emerald-600'
-        }`}
-      >
-        <div className={`w-2 h-2 rounded-full ${isPassive ? 'bg-amber-500 animate-pulse' : 'bg-emerald-500'}`} />
-        <span className="text-[10px] font-bold uppercase tracking-wider">{isPassive ? 'Passive' : 'Active'}</span>
-      </button>
-
-      {/* Onboarding Hover Trigger */}
-      <div onMouseEnter={() => setIsHovered(true)} onMouseLeave={() => setIsHovered(false)}>
-        <motion.div 
-          animate={{ width: isHovered ? 240 : 64 }}
-          className="h-16 flex items-center justify-center rounded-[32px] overflow-hidden cursor-help"
+      <div style={styles.right} className="app-no-drag">
+        {/* Window controls */}
+        <button
+          onClick={() => window.electron?.minimize()}
+          style={styles.windowButton}
+          title="Minimize"
         >
-          <AnimatePresence mode="wait">
-            {isHovered ? (
-              <motion.div key="exp" initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex items-center gap-4 px-6 w-full">
-                <div className="w-10 h-10 rounded-full bg-[#FF2D8D] flex items-center justify-center text-white"><Play size={18} /></div>
-                <div className="flex flex-col text-left"><span className="text-xs font-bold dark:text-white">Launch Onboarding</span></div>
-                <button onClick={() => navigate('/training/placement')} className="ml-auto"><ChevronRight size={16} /></button>
-              </motion.div>
-            ) : (
-              <Info size={22} className="text-slate-400" />
-            )}
-          </AnimatePresence>
-        </motion.div>
-      </div>
+          <Minus size={14} />
+        </button>
+        <button
+          onClick={() => window.electron?.maximize()}
+          style={styles.windowButton}
+          title="Maximize"
+        >
+          <Square size={14} />
+        </button>
+        <button
+          onClick={() => window.electron?.close()}
+          style={styles.closeButton}
+          title="Close"
+        >
+          <X size={14} />
+        </button>
 
-      <div className="flex items-center gap-1 pr-3">
-         <Settings size={18} className="text-slate-400 mx-2" />
-         <button className="w-12 h-12 rounded-full bg-slate-900 dark:bg-white text-white dark:text-[#121218] flex items-center justify-center shadow-lg"><Power size={18} /></button>
+        {/* Theme toggle */}
+        <button
+          onClick={toggleTheme}
+          style={styles.windowButton}
+          title={isDark ? "Switch to light mode" : "Switch to dark mode"}
+        >
+          {isDark ? <Sun size={16} /> : <Moon size={16} />}
+        </button>
+
+        {/* Overlay toggle */}
+        <button
+          onClick={toggleOverlay}
+          style={styles.overlayButton}
+          title={isOverlay ? "Exit overlay mode" : "Enter overlay mode"}
+        >
+          {isOverlay ? <Maximize2 size={16} /> : <Minimize2 size={16} />}
+          <span>{isOverlay ? "Expand" : "Overlay"}</span>
+        </button>
       </div>
-    </motion.div>
+    </div>
   );
-};
+}
 
-const ToolbarButton: React.FC<{ active: boolean; onClick: () => void; label: string; icon: any; color?: string }> = ({ active, onClick, label, icon, color }) => (
-  <button 
+const ToolbarButton: React.FC<{
+  active: boolean;
+  onClick: () => void;
+  label: string;
+  icon: any;
+  color?: string;
+}> = ({ active, onClick, label, icon: Icon, color }) => (
+  <button
     onClick={onClick}
-    className={`w-14 h-14 rounded-full flex flex-col items-center justify-center transition-all ${
-      active ? (color === 'blue' ? 'bg-indigo-500 text-white' : 'bg-slate-900 dark:bg-white text-white dark:text-slate-900') : 'text-slate-400'
-    }`}
+    style={{
+      ...styles.button,
+      ...(active ? styles.buttonActive : {}),
+      ...(color ? { color } : {}),
+    }}
   >
-    {icon}
-    <span className="text-[8px] font-bold uppercase mt-1">{label}</span>
+    <Icon size={16} />
+    <span>{label}</span>
   </button>
 );
+
+const styles: Record<string, React.CSSProperties> = {
+  toolbar: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    padding: "0 16px",
+    height: 48,
+    borderBottom: "1px solid var(--toolbar-border)",
+  },
+  left: {
+    display: "flex",
+    alignItems: "center",
+    gap: 12,
+  },
+  logo: {
+    fontSize: 14,
+    fontWeight: 600,
+  },
+  center: {
+    display: "flex",
+    gap: 8,
+    flex: 1,
+    justifyContent: "center",
+    // WebkitAppRegion: "no-drag" as any, // Removed, use attribute if needed
+  },
+  right: {
+    display: "flex",
+    gap: 8,
+    // WebkitAppRegion: "no-drag" as any, // Removed, use attribute if needed
+  },
+  button: {
+    display: "flex",
+    alignItems: "center",
+    gap: 6,
+    padding: "6px 12px",
+    background: "transparent",
+    border: "1px solid transparent",
+    borderRadius: 6,
+    color: "var(--toolbar-muted)",
+    cursor: "pointer",
+    fontSize: 13,
+    transition: "all 0.2s",
+  },
+  buttonActive: {
+    background: "var(--bg-hover)",
+    border: "1px solid var(--border)",
+    color: "var(--toolbar-text)",
+  },
+  overlayButton: {
+    display: "flex",
+    alignItems: "center",
+    gap: 6,
+    padding: "6px 12px",
+    background: "#3b82f6",
+    border: "none",
+    borderRadius: 6,
+    color: "#ffffff",
+    cursor: "pointer",
+    fontSize: 13,
+    fontWeight: 600,
+    transition: "all 0.2s",
+  },
+  windowButton: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    width: 32,
+    height: 32,
+    background: "transparent",
+    border: "none",
+    borderRadius: 6,
+    color: "var(--toolbar-muted)",
+    cursor: "pointer",
+    transition: "all 0.2s",
+  },
+  closeButton: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    width: 32,
+    height: 32,
+    background: "transparent",
+    border: "none",
+    borderRadius: 6,
+    color: "var(--toolbar-muted)",
+    cursor: "pointer",
+    transition: "all 0.2s",
+    marginRight: 8,
+  },
+};
