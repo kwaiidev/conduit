@@ -246,6 +246,7 @@ class EyeTrackerService:
         self.last_emit_ms = 0
         self._gaze_mapper = self._build_gaze_mapper()
         self._cursor_backend = self._init_cursor_backend()
+        self._cursor_backends = [backend for backend in self._cursor_backend.get("backends", [])]
         self._cursor_pos = None
         self._cursor_move_warned = False
         self._no_emit_reason = deque(maxlen=5)
@@ -509,6 +510,24 @@ class EyeTrackerService:
 
             model_path = self.args.face_landmarker_task
             if not model_path:
+                candidate_path = os.path.join(
+                    os.path.dirname(os.path.abspath(__file__)),
+                    "assets",
+                    "models",
+                    "face_landmarker.task",
+                )
+                if os.path.exists(candidate_path):
+                    model_path = candidate_path
+                else:
+                    candidate_path = os.path.join(
+                        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                        "assets",
+                        "models",
+                        "face_landmarker.task",
+                    )
+                    if os.path.exists(candidate_path):
+                        model_path = candidate_path
+            if not model_path:
                 raise RuntimeError(
                     "Mediapipe 'tasks' package is installed, but no task model file is configured. "
                     "Pass --face-landmarker-task /path/to/face_landmarker.task"
@@ -632,10 +651,12 @@ class EyeTrackerService:
             return 1920, 1080
 
     def _init_cursor_backend(self) -> dict[str, Any]:
+        backends: list[dict[str, Any]] = []
         try:
             import pyautogui
 
-            return {"type": "pyautogui", "api": pyautogui}
+            _ = pyautogui.size()
+            backends.append({"type": "pyautogui", "api": pyautogui})
         except Exception as exc:
             if self.args.debug:
                 print(f"[Tracker] pyautogui unavailable for cursor control: {exc}")
@@ -645,12 +666,28 @@ class EyeTrackerService:
 
             controller = Controller()
             _ = controller.position
-            return {"type": "pynput", "api": controller}
+            backends.append({"type": "pynput", "api": controller})
         except Exception as exc:
             if self.args.debug:
                 print(f"[Tracker] pynput unavailable for cursor control: {exc}")
 
-        return {"type": "none"}
+        if not backends:
+            return {"type": "none", "backends": []}
+        return {"type": "manager", "backends": backends}
+
+    def _get_cursor_position(self, backend: dict[str, Any]) -> Optional[tuple[int, int]]:
+        try:
+            kind = backend.get("type")
+            api = backend.get("api")
+            if kind == "pyautogui":
+                x, y = api.position()
+                return (int(x), int(y))
+            if kind == "pynput":
+                x, y = api.position
+                return (int(x), int(y))
+        except Exception:
+            return None
+        return None
 
     def _is_key_down(self, key_name: str) -> bool:
         if not self._keyboard_enabled or keyboard is None:
@@ -1406,6 +1443,9 @@ class EyeTrackerService:
                     target_y = None
                     raw_yaw = None
                     raw_pitch = None
+                    target_x = None
+                    target_y = None
+                    target_source = self.args.cursor_mode
                     try:
                         if self.args.cursor_mode == "legacy_3d":
                             target_x, target_y = self._legacy_3d_target(face_landmarks, w, h)
@@ -1413,7 +1453,21 @@ class EyeTrackerService:
                             target_x, target_y = self._iris_direct_target(face_landmarks)
                         else:
                             target_x, target_y = self._feature_mapper_target(face_landmarks)
-                        if target_x is not None and target_y is not None and eyes_open:
+                    except Exception:
+                        target_x = target_y = None
+
+                    if target_x is None or target_y is None or not self._is_finite_xy((target_x, target_y)):
+                        if self.args.cursor_mode != "iris_direct":
+                            try:
+                                target_x, target_y = self._iris_direct_target(face_landmarks)
+                                target_source = "iris_direct_fallback"
+                            except Exception:
+                                target_x = target_y = None
+                        if target_x is not None and target_y is not None and self._is_finite_xy((target_x, target_y)):
+                            target_source = "fallback_invalid"
+
+                    try:
+                        if target_x is not None and target_y is not None and self._is_finite_xy((target_x, target_y)) and eyes_open:
                             ts = now_ms() / 1000.0
                             self._raw_target_queue.append((float(target_x), float(target_y)))
                             if len(self._raw_target_queue) >= 3:
@@ -1449,7 +1503,7 @@ class EyeTrackerService:
                                     f"Pitch: {raw_pitch:.2f}",
                                 ]
                             else:
-                                texts = [f"Screen: ({target_x}, {target_y})"]
+                                texts = [f"Screen: ({target_x}, {target_y}) [{target_source}]"]
                             for i, text in enumerate(texts):
                                 color = (0, 255, 0)
                                 cv2.putText(
@@ -1461,11 +1515,11 @@ class EyeTrackerService:
                                     color,
                                     2,
                                 )
+                        else:
+                            if eyes_open:
+                                self._emit_noop("gaze_target_unavailable")
                     except Exception as exc:
                         self._emit_noop(f"gaze_target_unavailable:{exc}")
-                else:
-                    if self.args.cursor_mode in ("legacy_3d", "feature_mapper", "iris_direct"):
-                        self._emit_noop("pose_unavailable")
             else:
                 self._emit_noop("no_face")
                 cv2.putText(
@@ -1655,18 +1709,47 @@ class EyeTrackerService:
         new_x = max(0, min(max(0, self.monitor_width - 1), new_x))
         new_y = max(0, min(max(0, self.monitor_height - 1), new_y))
 
-        try:
-            if kind == "pyautogui":
-                self._cursor_backend["api"].moveTo(new_x, new_y, _pause=False)
-            else:
-                self._cursor_backend["api"].position = (new_x, new_y)
-        except Exception:
+        backends = self._cursor_backends or []
+        if not backends:
             if not self._cursor_move_warned:
-                print("[Tracker] cursor-move failed. Check OS accessibility/input permissions.")
+                print("[Tracker] Cursor control unavailable.")
                 self._cursor_move_warned = True
             return
 
-        self._cursor_pos = (new_x, new_y)
+        for backend in backends:
+            backend_type = backend.get("type", "unknown")
+            before = self._get_cursor_position(backend)
+            try:
+                if backend_type == "pyautogui":
+                    backend["api"].moveTo(new_x, new_y, _pause=False)
+                else:
+                    backend["api"].position = (new_x, new_y)
+            except Exception:
+                if self.args.debug:
+                    print(f"[Tracker] cursor-backend {backend_type} threw error; trying next backend.")
+                continue
+
+            after = self._get_cursor_position(backend)
+            if before is not None and after is not None:
+                before_dist = math.hypot(new_x - before[0], new_y - before[1])
+                after_dist = math.hypot(new_x - after[0], new_y - after[1])
+                if before_dist <= 1.0 or after_dist + 1.0 < before_dist:
+                    self._cursor_pos = after
+                    return
+                if self.args.debug:
+                    print(
+                        f"[Tracker] cursor-backend {backend_type} did not move cursor toward target "
+                        f"({before} -> {after}); trying next backend."
+                    )
+                continue
+
+            # If cursor position cannot be queried, assume command was accepted this call.
+            self._cursor_pos = (new_x, new_y)
+            return
+
+        if not self._cursor_move_warned:
+            print("[Tracker] cursor-move failed. Check OS accessibility/input permissions.")
+            self._cursor_move_warned = True
 
     def _emit_noop(self, reason: str) -> None:
         now = now_ms()
