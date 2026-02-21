@@ -36,6 +36,7 @@ import json
 import os
 import shutil
 import subprocess
+import threading
 import time
 import wave
 import sys
@@ -63,7 +64,7 @@ PORT               = 8766
 ELEVENLABS_API_KEY = os.environ.get("ELEVENLABS_API_KEY", "")
 GOOGLE_API_KEY     = os.environ.get("GOOGLE_API_KEY", "")
 GEMINI_MODEL       = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
-LATENCY_TIMEOUT    = float(os.environ.get("VOICE_LATENCY_TIMEOUT", "5.0"))
+LATENCY_TIMEOUT    = float(os.environ.get("VOICE_LATENCY_TIMEOUT", "15.0"))
 
 SAMPLE_RATE        = 16_000
 CHANNELS           = 1
@@ -295,21 +296,40 @@ class VoiceAgent:
         if not self.is_recording:
             return {"success": False, "reason": "not recording"}
 
+        # Stop the callback first so no new chunks arrive during teardown
         self.is_recording = False
-        if self._stream:
-            self._stream.stop()
-            self._stream.close()
-            self._stream = None
+
+        # Grab a snapshot of chunks before touching the stream
+        chunks = list(self._audio_chunks)
+        self._audio_chunks = []
+
+        stream = self._stream
+        self._stream = None
+        if stream:
+            # Close in a daemon thread — stream.stop() is a blocking PortAudio
+            # call and must never run on the async event loop thread.
+            def _close_stream():
+                try:
+                    stream.stop()
+                    stream.close()
+                except Exception as e:
+                    print(f"[{self._ts()}] Stream close error (non-fatal): {e}")
+            threading.Thread(target=_close_stream, daemon=True).start()
 
         duration = round(time.monotonic() - self._record_start, 2)
-        print(f"[{self._ts()}] PTT stop — {duration}s, {len(self._audio_chunks)} chunks")
+        print(f"[{self._ts()}] PTT stop — {duration}s, {len(chunks)} chunks")
 
-        if not self._audio_chunks or duration < 0.2:
+        if not chunks or duration < 0.2:
             event = self._make_noop("audio_too_short")
             self._schedule_broadcast(event)
             return {"success": False, "reason": "audio too short"}
 
-        audio = np.concatenate(self._audio_chunks, axis=0)
+        try:
+            audio = np.concatenate(chunks, axis=0)
+        except Exception as e:
+            print(f"[{self._ts()}] Audio concat error: {e}")
+            return {"success": False, "reason": "audio processing error"}
+
         self._processing        = True
         self._last_request_time = time.monotonic()
 
