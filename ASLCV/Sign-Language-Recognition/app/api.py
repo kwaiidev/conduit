@@ -15,6 +15,12 @@ Endpoints:
   POST /add|/space|/reset  sentence helpers
   GET|POST /settings        detection tuning
   GET|POST /typing/*        typing toggle / cooldown
+  POST /changestate         0 = paused, 1 = active
+  GET  /changestate         current active state
+  POST /sessionstate        0 = session disabled, 1 = session enabled
+  GET  /sessionstate        current session state
+
+Note: inference requires BOTH /changestate AND /sessionstate to be 1 (active/enabled).
 """
 
 import asyncio
@@ -145,7 +151,8 @@ class ASLDetector:
         self._last_typed_time: float = 0.0
 
         # State
-        self.active = True  # False = model paused; webcam + video feed still run
+        self.active = True          # False = model paused; webcam + video feed still run
+        self.session_enabled = True  # second gate — both must be True for inference
         self.current_letter: str | None = None
         self.current_confidence: float = 0.0
         self.last_logged_letter: str | None = None
@@ -191,7 +198,7 @@ class ASLDetector:
 
             frame = cv2.flip(frame, 1)
 
-            if not self.active:
+            if not self.active or not self.session_enabled:
                 # Model paused — still stream video but skip inference
                 with self.frame_lock:
                     self.current_frame = frame
@@ -466,6 +473,9 @@ async def health_check():
         "port": _PORT,
         "video_url": f"http://localhost:{_PORT}/video",
         "ws_url": f"ws://localhost:{_PORT}/ws/events",
+        "active": detector.active,
+        "session_enabled": detector.session_enabled,
+        "detection_ready": detector.active and detector.session_enabled,
     }
 
 
@@ -525,6 +535,36 @@ async def change_state(state: int):
 async def get_state():
     """Get the current model active state (1 = active, 0 = paused)."""
     return {"state": int(detector.active), "status": "active" if detector.active else "paused"}
+
+
+@app.post("/sessionstate")
+async def set_session_state(state: int):
+    """
+    Toggle the session gate.
+      state=1  → session enabled   (inference allowed if active is also 1)
+      state=0  → session disabled  (inference blocked regardless of active)
+    """
+    if state not in (0, 1):
+        return {"success": False, "message": "state must be 0 or 1"}
+    detector.session_enabled = bool(state)
+    label = "enabled" if detector.session_enabled else "disabled"
+    print(f"[{detector._timestamp()}] Session {label}")
+    return {
+        "success": True,
+        "state": state,
+        "status": label,
+        "detection_ready": detector.active and detector.session_enabled,
+    }
+
+
+@app.get("/sessionstate")
+async def get_session_state():
+    """Get the current session state (1 = enabled, 0 = disabled)."""
+    return {
+        "state": int(detector.session_enabled),
+        "status": "enabled" if detector.session_enabled else "disabled",
+        "detection_ready": detector.active and detector.session_enabled,
+    }
 
 
 @app.get("/settings")
