@@ -35,7 +35,7 @@ const App: React.FC = () => {
           }
         />
         
-        {/* Root redirect - send to onboarding or home based on completion */}
+        {/* Root redirect */}
         <Route
           path="/"
           element={
@@ -47,7 +47,7 @@ const App: React.FC = () => {
           }
         />
         
-        {/* Catch all - redirect to root */}
+        {/* Catch all */}
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </BrowserRouter>

@@ -1,10 +1,10 @@
 :root {
-  --bg-primary: #0b0b0b;
+  --bg-primary: #f6f6f6;
   --bg-secondary: #1b1b1b;
   --bg-hover: #2a2a2a;
-  --text-primary: #eaeaea;
-  --text-secondary: #a0a0a0;
-  --border: #2a2a2a;
+  --text-primary: #151515;
+  --text-secondary: #282828;
+  --border: #b95c62;
   --accent: #3b82f6;
   --accent-hover: #2563eb;
 }
@@ -128,4 +128,222 @@ a:hover {
 ::selection {
   background-color: var(--accent);
   color: white;
+}
+
+/* Page container */
+.page-container {
+  max-width: 700px;
+  padding: 20px;
+}
+
+/* Button styles */
+.btn {
+  margin-top: 16px;
+  padding: 12px 24px;
+  border-radius: 12px;
+  font-size: 16px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  border: none;
+
+.btn-primary {
+  background: var(--accent);
+  color: #ffffff;
+}
+
+.btn-primary:hover {
+  background: var(--accent-hover);
+}
+
+.btn-secondary {
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+}
+
+.btn-secondary:hover {
+  background: var(--bg-hover);
+}
+}
+
+// ...existing code...
+
+/* Onboarding styles */
+.onboarding-container {
+  height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-primary);
+}
+
+.onboarding-content {
+  max-width: 700px;
+  text-align: center;
+  padding: 40px;
+}
+
+.step-indicator {
+  font-size: 14px;
+  color: var(--text-secondary);
+  margin-bottom: 20px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+
+.step-content {
+  margin: 40px 0;
+  padding: 40px;
+  background: var(--bg-secondary);
+  border-radius: 12px;
+  min-height: 250px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.placeholder-content {
+  font-size: 24px;
+  color: var(--text-secondary);
+}
+
+.button-group {
+  display: flex;
+  gap: 12px;
+  justify-content: center;
+  margin-top: 40px;
+}
+
+
+/* Onboarding styles */
+.onboarding-container {
+  height: 100vh;
+  width: 100vw;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-primary);
+  padding: 20px;
+  box-sizing: border-box;
+}
+
+.onboarding-content {
+  max-width: 700px;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+
+.onboarding-inner {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  animation: fadeInUp 0.5s ease-out;
+}
+
+/* Fade in and slide up animation */
+@keyframes fadeInUp {
+  from {
+    opacity: 0;
+    transform: translateY(30px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.step-indicator {
+  font-size: 14px;
+  color: var(--text-secondary);
+  margin-bottom: 20px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  text-align: center;
+  animation: fadeIn 0.6s ease-out 0.2s both;
+}
+
+/* Simple fade in */
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.onboarding-inner h1 {
+  margin-bottom: 16px;
+  text-align: center;
+  animation: fadeInUp 0.5s ease-out 0.1s both;
+}
+
+.onboarding-inner p {
+  margin-bottom: 0;
+  max-width: 500px;
+  text-align: center;
+  animation: fadeInUp 0.5s ease-out 0.2s both;
+}
+
+.step-content {
+  margin: 40px 0;
+  padding: 40px;
+  background: var(--bg-secondary);
+  border-radius: 12px;
+  min-height: 250px;
+  width: 100%;
+  max-width: 600px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation: scaleIn 0.5s ease-out 0.3s both;
+  transition: transform 0.3s ease, box-shadow 0.3s ease;
+}
+
+.step-content:hover {
+  transform: scale(1.02);
+  box-shadow: 0 8px 24px rgba(59, 130, 246, 0.15);
+}
+
+/* Scale in animation */
+@keyframes scaleIn {
+  from {
+    opacity: 0;
+    transform: scale(0.9);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.placeholder-content {
+  font-size: 24px;
+  color: var(--text-secondary);
+  text-align: center;
+  animation: pulse 2s ease-in-out infinite;
+}
+
+/* Subtle pulse animation */
+@keyframes pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.6;
+  }
+}
+
+.button-group {
+  display: flex;
+  gap: 12px;
+  justify-content: center;
+  align-items: center;
+  margin-top: 40px;
+  animation: fadeInUp 0.5s ease-out 0.4s both;
 }
