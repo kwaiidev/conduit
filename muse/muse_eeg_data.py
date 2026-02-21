@@ -1,19 +1,27 @@
 import numpy as np
-import matplotlib.pyplot as plt
-import matplotlib.animation as animation
 from pylsl import StreamInlet, resolve_byprop
 from scipy import signal
 from scipy.interpolate import RBFInterpolator
+from PIL import Image
+import matplotlib.cm as cm
 import csv
 import os
+import io
 import time
+import threading
 from collections import deque
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
+# ================================
+# Configuration
+# ================================
 WINDOW_LENGTH      = 5
 SAMPLES_PER_WINDOW = 128
 OVERLAP_SAMPLES    = 32
 LABEL_MODE         = 1
 COUNT              = 0
+STREAM_PORT        = 5000
+FRAME_INTERVAL     = 0.01   # seconds between frames (~20fps)
 
 CHANNEL_POSITIONS = {
     "TP9":  (-0.72, -0.28),
@@ -22,6 +30,50 @@ CHANNEL_POSITIONS = {
     "TP10": ( 0.72, -0.28),
 }
 
+# ================================
+# Shared frame state
+# ================================
+latest_frame = None
+frame_lock   = threading.Lock()
+
+# ================================
+# Interpolation grid (computed once)
+# ================================
+GRID_RES = 300
+xi = np.linspace(-1.0, 1.0, GRID_RES)
+yi = np.linspace(-1.0, 1.0, GRID_RES)
+grid_x, grid_y = np.meshgrid(xi, yi)
+brain_mask      = (grid_x**2 + grid_y**2) <= 1.0
+grid_pts_inside = np.column_stack([grid_x[brain_mask], grid_y[brain_mask]])
+plasma          = cm.get_cmap('plasma')
+
+def interpolate_topomap(positions, values):
+    v   = np.array(values, dtype=float)
+    ptp = np.ptp(v)
+    v   = (v - v.min()) / ptp if ptp > 1e-9 else np.full_like(v, 0.5)
+
+    rbf    = RBFInterpolator(positions, v, kernel='thin_plate_spline', smoothing=0)
+    grid_z = np.zeros(grid_x.shape, dtype=float)
+    grid_z[brain_mask] = np.clip(rbf(grid_pts_inside), 0, 1)
+
+    # Colormap → RGBA → RGB, black outside brain
+    rgba  = (plasma(grid_z) * 255).astype(np.uint8)
+    rgb   = rgba[:, :, :3]
+    rgb[~brain_mask] = 0   # black background outside scalp
+
+    # Flip vertically so front of head is at top
+    return np.flipud(rgb)
+
+def frame_to_jpeg(rgb_array, size=500):
+    img = Image.fromarray(rgb_array, 'RGB').resize((size, size), Image.BILINEAR)
+    buf = io.BytesIO()
+    img.save(buf, format='JPEG', quality=85)
+    buf.seek(0)
+    return buf.read()
+
+# ================================
+# Feature Extractor
+# ================================
 class FeatureExtractor:
     def __init__(self, sfreq=256):
         self.sfreq = sfreq
@@ -53,7 +105,46 @@ class FeatureExtractor:
         freqs, psd = signal.welch(data, fs=self.sfreq, nperseg=min(64, len(data)))
         return self._band(freqs, psd, fmin, fmax)
 
+# ================================
+# MJPEG HTTP Server
+# ================================
+class MJPEGHandler(BaseHTTPRequestHandler):
+    def log_message(self, format, *args):
+        pass  # silence per-request logs
 
+    def do_GET(self):
+        if self.path == '/stream':
+            self.send_response(200)
+            self.send_header('Content-Type', 'multipart/x-mixed-replace; boundary=frame')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            try:
+                while True:
+                    with frame_lock:
+                        frame = latest_frame
+                    if frame is not None:
+                        self.wfile.write(b'--frame\r\n')
+                        self.wfile.write(b'Content-Type: image/jpeg\r\n\r\n')
+                        self.wfile.write(frame)
+                        self.wfile.write(b'\r\n')
+                    time.sleep(FRAME_INTERVAL)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+def start_mjpeg_server(port=STREAM_PORT):
+    server = HTTPServer(('0.0.0.0', port), MJPEGHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    print(f"[STREAM] http://localhost:{port}/stream")
+    print(f"[STREAM] http://localhost:{port}/  (preview page)")
+
+# ================================
+# LSL Setup
+# ================================
 def setup_lsl_inlet(stream_type='EEG', timeout=5.0):
     print(f"[LSL] Searching for '{stream_type}' stream...")
     streams = resolve_byprop('type', stream_type, 1, timeout)
@@ -63,26 +154,13 @@ def setup_lsl_inlet(stream_type='EEG', timeout=5.0):
     print(f"[LSL] Stream connected.")
     return inlet
 
-
-GRID_RES = 300
-xi = np.linspace(-1.0, 1.0, GRID_RES)
-yi = np.linspace(-1.0, 1.0, GRID_RES)
-grid_x, grid_y = np.meshgrid(xi, yi)
-brain_mask = (grid_x**2 + grid_y**2) <= 1.0
-grid_pts_inside = np.column_stack([grid_x[brain_mask], grid_y[brain_mask]])
-
-def interpolate_topomap(positions, values):
-    v = np.array(values, dtype=float)
-    ptp = np.ptp(v)
-    v = (v - v.min()) / ptp if ptp > 1e-9 else np.full_like(v, 0.5)
-    rbf = RBFInterpolator(positions, v, kernel='thin_plate_spline', smoothing=0)
-    grid_z = np.full(grid_x.shape, np.nan)
-    grid_z[brain_mask] = rbf(grid_pts_inside)
-    return grid_z
-
-
+# ================================
+# Main loop
+# ================================
 def main():
-    global COUNT
+    global COUNT, latest_frame
+
+    start_mjpeg_server()
 
     eeg_inlet  = setup_lsl_inlet('EEG')
     info       = eeg_inlet.info()
@@ -94,7 +172,7 @@ def main():
     eeg_buffer = deque(maxlen=SAMPLES_PER_WINDOW)
     samples_since_last_save = 0
 
-    # Channel names from stream info
+    # Channel names
     ch_names = []
     ch_node  = info.desc().child("channels").child("channel")
     for _ in range(n_channels):
@@ -130,30 +208,13 @@ def main():
             csv.writer(f).writerow(cols)
         print(f"[CSV] Created '{filename}' ({len(cols)-1} features + label)")
 
-    fig = plt.figure(figsize=(5, 5), facecolor='black')
-    ax  = fig.add_axes([0, 0, 1, 1])  # axes fill the entire figure
-    ax.set_facecolor('black')
-    ax.axis('off')
-    ax.set_xlim(-1, 1)
-    ax.set_ylim(-1, 1)
-    ax.set_aspect('equal')
+    print("[MAIN] Running — Ctrl+C to stop\n")
 
-    heatmap = ax.imshow(
-        np.full(grid_x.shape, np.nan),
-        extent=(-1, 1, -1, 1),
-        origin='lower',
-        cmap='plasma',
-        vmin=0, vmax=1,
-        interpolation='bilinear',
-        zorder=1,
-        aspect='equal'
-    )
-
-    def update(frame):
-        nonlocal samples_since_last_save
-        global COUNT
-
-        samples, _ = eeg_inlet.pull_chunk(timeout=0.0)
+    # ================================
+    # Main loop
+    # ================================
+    while True:
+        samples, _ = eeg_inlet.pull_chunk(timeout=0.1)
         if samples:
             for s in samples:
                 eeg_buffer.append(s)
@@ -162,7 +223,7 @@ def main():
         buf_len = len(eeg_buffer)
         if buf_len < SAMPLES_PER_WINDOW:
             print(f"[BUFFER] {buf_len}/{SAMPLES_PER_WINDOW} samples", end='\r')
-            return [heatmap]
+            continue
 
         window_data = np.array(eeg_buffer)
 
@@ -182,35 +243,26 @@ def main():
                 active_names[j]: extractor.band_power_single(window_data[:, idx], 13, 30)
                 for j, idx in enumerate(active_indices)
             }
-            alpha_str = "  ".join(f"{n}={v:.3f}" for n, v in alpha_vals.items())
-            beta_str  = "  ".join(f"{n}={v:.3f}" for n, v in beta_vals.items())
             ts = time.strftime("%H:%M:%S")
             print(f"[{ts}] label={LABEL_MODE}  window={COUNT:04d}")
-            print(f"         alpha -> {alpha_str}")
-            print(f"         beta  -> {beta_str}")
+            print(f"         alpha -> " + "  ".join(f"{n}={v:.3f}" for n, v in alpha_vals.items()))
+            print(f"         beta  -> " + "  ".join(f"{n}={v:.3f}" for n, v in beta_vals.items()))
 
-        # Heatmap update
+        # Generate & push frame
         alpha_values = [
             extractor.band_power_single(window_data[:, idx], 8, 13)
             for idx in active_indices
         ]
-        grid_z = interpolate_topomap(positions, alpha_values)
-        heatmap.set_data(grid_z)
-
-        return [heatmap]
-
-    ani = animation.FuncAnimation(
-        fig, update,
-        interval=50,
-        blit=True,
-        cache_frame_data=False
-    )
-
-    plt.show()
+        rgb = interpolate_topomap(positions, alpha_values)
+        jpeg = frame_to_jpeg(rgb)
+        with frame_lock:
+            latest_frame = jpeg
 
 
 if __name__ == "__main__":
     try:
         main()
+    except KeyboardInterrupt:
+        print("\n[MAIN] Stopped.")
     except RuntimeError as e:
         print(f"\n[ERROR] {e}")
