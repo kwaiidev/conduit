@@ -144,7 +144,7 @@ def default_affine_for_screen(
         ax=(screen_w - 1) / (2.0 * fx),
         bx=0.0,
         cx=(screen_w - 1) / 2.0,
-        ay=(screen_h - 1) / (2.0 * fy),
-        by=0.0,
+        ay=0.0,
+        by=(screen_h - 1) / (2.0 * fy),
         cy=(screen_h - 1) / 2.0,
     )

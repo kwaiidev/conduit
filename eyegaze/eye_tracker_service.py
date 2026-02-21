@@ -393,13 +393,25 @@ class EyeTrackerService:
     def _apply_gaze_gain(self, x_norm: float, y_norm: float) -> tuple[float, float]:
         gain = max(0.1, float(self.args.cursor_gain))
         bottom_gain_mult = max(1.0, float(getattr(self.args, "cursor_bottom_gain_mult", 1.0)))
+        bottom_curve = float(getattr(self.args, "cursor_bottom_curve", 0.75))
+        bottom_curve = max(0.2, min(1.5, bottom_curve))
+        bottom_start = float(getattr(self.args, "cursor_bottom_start", 0.5))
+        bottom_start = max(0.0, min(1.0, bottom_start))
+        bottom_span = float(getattr(self.args, "cursor_bottom_span", 0.5))
+        bottom_span = max(1e-6, min(1.0 - bottom_start, bottom_span))
+        y_norm = float(y_norm)
         cx = 0.5
         cy = 0.5
         gx = cx + (float(x_norm) - cx) * gain
-        dy = float(y_norm) - cy
+        if y_norm > bottom_start:
+            stretch = min(1.0, max(0.0, (y_norm - bottom_start) / bottom_span))
+            stretch = math.pow(stretch, bottom_curve)
+            y_norm = bottom_start + stretch * (1.0 - bottom_start)
+        dy = y_norm - cy
         y_scale = gain
         if dy > 0.0 and bottom_gain_mult > 1.0:
-            t = min(1.0, max(0.0, dy / 0.5))
+            t = min(1.0, max(0.0, (y_norm - bottom_start) / bottom_span))
+            t = math.pow(t, bottom_curve)
             y_scale = gain * (1.0 + (bottom_gain_mult - 1.0) * (t * t))
         gy = cy + dy * y_scale
         return (
@@ -1589,7 +1601,20 @@ class EyeTrackerService:
         gaze_feature = compute_gaze_feature(face_landmarks)
         if gaze_feature is None:
             raise ValueError("gaze feature unavailable")
-        return self._convert_legacy_features_to_screen(gaze_feature)
+        raw_x, raw_y = self._gaze_mapper.map(gaze_feature)
+        if self.args.invert_gaze_x:
+            raw_x = self.monitor_width - 1 - raw_x
+        if self.args.invert_gaze_y:
+            raw_y = self.monitor_height - 1 - raw_y
+
+        norm_x = raw_x / max(1.0, float(self.monitor_width - 1))
+        norm_y = raw_y / max(1.0, float(self.monitor_height - 1))
+        norm_x, norm_y = self._apply_gaze_gain(norm_x, norm_y)
+        screen_x = norm_x * max(1.0, float(self.monitor_width - 1))
+        screen_y = norm_y * max(1.0, float(self.monitor_height - 1))
+        screen_x = max(0.0, min(float(self.monitor_width - 1), screen_x))
+        screen_y = max(0.0, min(float(self.monitor_height - 1), screen_y))
+        return int(screen_x), int(screen_y)
 
     def _emit_gaze(self, x: int, y: int, confidence: float) -> None:
         now = now_ms()
@@ -1689,7 +1714,7 @@ def parse_args() -> argparse.Namespace:
         help="Optional comma-separated coefficients ax,bx,cx,ay,by,cy.",
     )
     parser.add_argument("--gaze-half-range-x", type=float, default=0.15, help="Fallback gaze feature half-range x.")
-    parser.add_argument("--gaze-half-range-y", type=float, default=0.10, help="Fallback gaze feature half-range y.")
+    parser.add_argument("--gaze-half-range-y", type=float, default=0.07, help="Fallback gaze feature half-range y.")
     parser.add_argument("--filter-length", type=int, default=10)
     parser.add_argument("--gaze-ray-length", type=int, default=350)
     parser.add_argument("--one-euro-cutoff", type=float, default=0.1)
@@ -1738,8 +1763,26 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--cursor-bottom-gain-mult",
         type=float,
-        default=1.45,
+        default=2.0,
         help="Additional bottom-half vertical gain multiplier.",
+    )
+    parser.add_argument(
+        "--cursor-bottom-curve",
+        type=float,
+        default=0.55,
+        help="Bottom-half response curve exponent (<1 = more responsive).",
+    )
+    parser.add_argument(
+        "--cursor-bottom-start",
+        type=float,
+        default=0.5,
+        help="Normalized Y value at which bottom-half gain starts (0.5 default).",
+    )
+    parser.add_argument(
+        "--cursor-bottom-span",
+        type=float,
+        default=0.5,
+        help="Normalized Y span over which bottom-half gain ramps to max (smaller = stronger near-top response).",
     )
     parser.add_argument(
         "--cursor-max-speed-px-s",
