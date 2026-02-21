@@ -343,6 +343,17 @@ def main():
         window_data = np.array(eeg_buffer)   # (SAMPLES_PER_WINDOW, n_channels)
         features    = extractor.extract_features(window_data)
 
+        # ---- Update topomap ----
+        if positions is not None:
+            alpha_values = [
+                extractor.band_power_single(window_data[:, idx], 8, 13)
+                for idx in active_indices
+            ]
+            rgb  = interpolate_topomap(positions, alpha_values)
+            jpeg = frame_to_jpeg(rgb)
+            with frame_lock:
+                latest_frame = jpeg
+
         raw_pred  = int(model.predict(features.reshape(1, -1))[0])
         raw_proba = model.predict_proba(features.reshape(1, -1))[0]
 
@@ -390,36 +401,29 @@ def main():
             continue
 
         # ---- Fire action ----
+        asl_state = 0
         if majority_prediction == 0:
             print(f"  [IDLE] No action.")
-            requests.post("http://localhost:8765", data={state:0})
         if state:
             if majority_prediction == 1:
                 click("left")
-                requests.post("http://localhost:8765", data={state:0})
                 last_action_time = now
             elif majority_prediction == 2:
                 click("right")
-                requests.post("http://localhost:8765", data={state:0})
                 last_action_time = now
             elif majority_prediction == 3:
-                requests.post("http://localhost:8765", data={state:1})
+                asl_state = 1
                 last_action_time = now
+
+        try:
+            requests.post("http://localhost:8765", data={state:asl_state})
+        except:
+            pass
 
         # Reset debounce after firing so next action requires fresh agreement
         consecutive_count  = 0
         pending_prediction = -1
 
-        # ---- Update topomap ----
-        if positions is not None:
-            alpha_values = [
-                extractor.band_power_single(window_data[:, idx], 8, 13)
-                for idx in active_indices
-            ]
-            rgb  = interpolate_topomap(positions, alpha_values)
-            jpeg = frame_to_jpeg(rgb)
-            with frame_lock:
-                latest_frame = jpeg
 
 
 if __name__ == '__main__':
