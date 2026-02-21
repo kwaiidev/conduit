@@ -13,6 +13,7 @@ from pylsl import StreamInlet, resolve_byprop
 import os
 import subprocess
 import platform
+import requests
 
 # ================================
 # Config
@@ -23,7 +24,7 @@ STREAM_PORT           = 5000
 FRAME_INTERVAL        = 0.05
 
 # Majority vote over last N windows
-VOTE_BUFFER_SIZE      = 5
+VOTE_BUFFER_SIZE      = 3
 
 # How many consecutive majority votes must agree before firing an action.
 # With VOTE_BUFFER_SIZE=5 and STRIDE=64 samples @ 256Hz, each vote is ~0.25s apart,
@@ -366,14 +367,17 @@ def main():
         # ---- Fire action ----
         if majority_prediction == 0:
             print(f"  [IDLE] No action.")
+            requests.post("http://localhost:8765", data={state:0})
         elif majority_prediction == 1:
             click("left")
+            requests.post("http://localhost:8765", data={state:0})
             last_action_time = now
         elif majority_prediction == 2:
             click("right")
+            requests.post("http://localhost:8765", data={state:0})
             last_action_time = now
         elif majority_prediction == 3:
-            print("  [ACTION 3] (define your action here)")
+            requests.post("http://localhost:8765", data={state:1})
             last_action_time = now
 
         # Reset debounce after firing so next action requires fresh agreement
