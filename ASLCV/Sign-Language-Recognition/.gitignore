@@ -1,0 +1,17 @@
+# Ignore IDE and Python cache directories
+__pycache__/
+
+# Ignore project-specific directories
+ASL/
+ASL-crop/
+ASL-MediaPipe/
+WLASL/
+data/compressed_asl*.npz
+demo*
+data/backup/
+compressor/__pycache__/
+
+# Raw Downlaods
+raw_downloads/
+
+venv/
