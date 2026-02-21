@@ -145,6 +145,7 @@ class ASLDetector:
         self._last_typed_time: float = 0.0
 
         # State
+        self.active = True  # False = model paused; webcam + video feed still run
         self.current_letter: str | None = None
         self.current_confidence: float = 0.0
         self.last_logged_letter: str | None = None
@@ -189,6 +190,17 @@ class ASLDetector:
                 continue
 
             frame = cv2.flip(frame, 1)
+
+            if not self.active:
+                # Model paused — still stream video but skip inference
+                with self.frame_lock:
+                    self.current_frame = frame
+                with self.lock:
+                    self.current_letter = None
+                    self.current_confidence = 0.0
+                time.sleep(self.frame_delay)
+                continue
+
             prediction, confidence, display_frame = self._make_prediction(frame.copy())
 
             with self.frame_lock:
@@ -492,6 +504,27 @@ async def add_space():
 async def reset_sentence():
     detector.reset_sentence()
     return {"success": True, "sentence": ""}
+
+
+@app.post("/changestate")
+async def change_state(state: int):
+    """
+    Toggle the ASL model on or off.
+      state=1  → model active   (detection + typing resume)
+      state=0  → model paused   (webcam + video feed keep running, no inference)
+    """
+    if state not in (0, 1):
+        return {"success": False, "message": "state must be 0 or 1"}
+    detector.active = bool(state)
+    status = "active" if detector.active else "paused"
+    print(f"[{detector._timestamp()}] Model {status}")
+    return {"success": True, "state": state, "status": status}
+
+
+@app.get("/changestate")
+async def get_state():
+    """Get the current model active state (1 = active, 0 = paused)."""
+    return {"state": int(detector.active), "status": "active" if detector.active else "paused"}
 
 
 @app.get("/settings")
