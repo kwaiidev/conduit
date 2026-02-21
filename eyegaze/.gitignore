@@ -1,0 +1,4 @@
+# Eye gaze module local ignores
+.venv
+.dist
+__pycache__
