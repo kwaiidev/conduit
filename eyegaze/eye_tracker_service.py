@@ -732,14 +732,16 @@ class EyeTrackerService:
         )
 
         if self.args.debug:
-            try:
-                cv2.namedWindow("Integrated Eye Tracking", cv2.WINDOW_AUTOSIZE)
-            except cv2.error:
-                pass
-            try:
-                cv2.namedWindow("Head/Eye Debug", cv2.WINDOW_AUTOSIZE)
-            except cv2.error:
-                pass
+            for window_name in ("Integrated Eye Tracking", "Head/Eye Debug"):
+                try:
+                    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+                    cv2.setWindowProperty(
+                        window_name,
+                        cv2.WND_PROP_FULLSCREEN,
+                        cv2.WINDOW_FULLSCREEN,
+                    )
+                except cv2.error:
+                    pass
 
         last_toggle = 0.0
         last_calibration_key = 0.0
