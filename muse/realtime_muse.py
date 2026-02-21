@@ -2,6 +2,9 @@ import numpy as np
 from scipy import signal
 from scipy.interpolate import RBFInterpolator
 from PIL import Image
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 from collections import deque, Counter
 import pickle
@@ -25,19 +28,14 @@ WINDOW_STRIDE         = 64      # Must match data_collection.py
 STREAM_PORT           = 5000
 FRAME_INTERVAL        = 0.05
 
-# Majority vote over last N windows
 VOTE_BUFFER_SIZE      = 3
-
-# How many consecutive majority votes must agree before firing an action.
-# With VOTE_BUFFER_SIZE=5 and STRIDE=64 samples @ 256Hz, each vote is ~0.25s apart,
-# so CONSECUTIVE_THRESHOLD=3 means ~0.75s of agreement before clicking.
 CONSECUTIVE_THRESHOLD = 3
-
-# Minimum confidence to act on a prediction (0–1)
 MIN_CONFIDENCE        = 0.4
-
-# Cooldown between actions in seconds (prevents rapid-fire clicks)
 ACTION_COOLDOWN       = 1.0
+
+# How many strides to skip between wave plot re-renders.
+# Rendering matplotlib is slow (~100ms); we don't need it every 64 samples.
+WAVE_RENDER_EVERY     = 4
 
 CHANNEL_POSITIONS = {
     "TP9":  (-0.72, -0.28),
@@ -46,14 +44,32 @@ CHANNEL_POSITIONS = {
     "TP10": ( 0.72, -0.28),
 }
 
+BAND_COLORS = {
+    "Delta (1-4 Hz)":   "#7B68EE",
+    "Theta (4-8 Hz)":   "#00CED1",
+    "Alpha (8-13 Hz)":  "#32CD32",
+    "Beta (13-30 Hz)":  "#FF8C00",
+    "Gamma (30-50 Hz)": "#FF4500",
+}
 
 state = 1
 
 # ================================
-# Shared frame state
+# Shared frame state - topomap
 # ================================
-latest_frame = None
-frame_lock   = threading.Lock()
+latest_topo_frame = None
+topo_frame_lock   = threading.Lock()
+
+# ================================
+# Shared frame state - brainwaves
+# ================================
+latest_wave_frame = None
+wave_frame_lock   = threading.Lock()
+
+# Ring buffer for band-power history
+WAVE_HISTORY   = 60
+wave_history   = {name: deque(maxlen=WAVE_HISTORY) for name in BAND_COLORS}
+wave_hist_lock = threading.Lock()
 
 # ================================
 # Interpolation grid (computed once)
@@ -103,7 +119,7 @@ def interpolate_topomap(positions, values):
     return np.flipud(rgb)
 
 
-def frame_to_jpeg(rgb_array, size=500):
+def rgb_to_jpeg(rgb_array, size=500):
     img = Image.fromarray(rgb_array, 'RGB').resize((size, size), Image.BILINEAR)
     buf = io.BytesIO()
     img.save(buf, format='JPEG', quality=85)
@@ -112,7 +128,57 @@ def frame_to_jpeg(rgb_array, size=500):
 
 
 # ================================
-# Feature Extractor — identical to data_collection.py
+# Brainwave plot renderer
+# ================================
+def render_wave_jpeg():
+    """Render current band-power history as a JPEG and return bytes."""
+    with wave_hist_lock:
+        bands = {k: list(v) for k, v in wave_history.items()}
+
+    fig, axes = plt.subplots(
+        len(bands), 1,
+        figsize=(10, 7),
+        sharex=True,
+        facecolor="#111111"
+    )
+    fig.subplots_adjust(hspace=0.08, top=0.92, bottom=0.08, left=0.14, right=0.97)
+    fig.suptitle("Live Brain Waves", color="white", fontsize=14, fontweight="bold")
+
+    for ax, (band_name, values) in zip(axes, bands.items()):
+        color = BAND_COLORS[band_name]
+        ax.set_facecolor("#1a1a2e")
+        ax.tick_params(colors="gray", labelsize=7)
+        for spine in ax.spines.values():
+            spine.set_edgecolor("#333355")
+
+        if len(values) >= 2:
+            x = np.arange(len(values))
+            y = np.array(values, dtype=float)
+            ax.plot(x, y, color=color, linewidth=1.5, alpha=0.9)
+            ax.fill_between(x, y, alpha=0.25, color=color)
+            ax.set_xlim(0, WAVE_HISTORY - 1)
+            ax.set_ylim(bottom=0)
+        else:
+            ax.text(
+                0.5, 0.5, "Waiting for data...",
+                transform=ax.transAxes,
+                ha="center", va="center",
+                color="gray", fontsize=9
+            )
+
+        ax.set_ylabel(band_name, color=color, fontsize=8, labelpad=4)
+
+    axes[-1].set_xlabel("Windows (newest -> right)", color="gray", fontsize=8)
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format='jpeg', dpi=100, facecolor=fig.get_facecolor())
+    plt.close(fig)
+    buf.seek(0)
+    return buf.read()
+
+
+# ================================
+# Feature Extractor - identical to data_collection.py
 # ================================
 class FeatureExtractor:
     """
@@ -155,8 +221,8 @@ class FeatureExtractor:
             gamma = np.log(self._band(freqs, psd, 30, 50) + eps)
 
             features.extend([delta, theta, alpha, beta, gamma])
-            features.append(beta  - alpha)  # log(beta/alpha)
-            features.append(theta - alpha)  # log(theta/alpha)
+            features.append(beta  - alpha)
+            features.append(theta - alpha)
 
         return np.array(features)
 
@@ -164,45 +230,143 @@ class FeatureExtractor:
         freqs, psd = signal.welch(data, fs=self.sfreq, nperseg=min(self.sfreq, len(data)))
         return self._band(freqs, psd, fmin, fmax)
 
+    def all_band_powers(self, data):
+        """Mean band power across all channels for each canonical band."""
+        n_samples, n_channels = data.shape
+        bands = {
+            "Delta (1-4 Hz)":   (1,  4),
+            "Theta (4-8 Hz)":   (4,  8),
+            "Alpha (8-13 Hz)":  (8,  13),
+            "Beta (13-30 Hz)":  (13, 30),
+            "Gamma (30-50 Hz)": (30, 50),
+        }
+        result = {name: 0.0 for name in bands}
+        for ch in range(n_channels):
+            d = self._bandpass(data[:, ch])
+            freqs, psd = signal.welch(d, fs=self.sfreq, nperseg=min(self.sfreq, n_samples))
+            for name, (fmin, fmax) in bands.items():
+                result[name] += self._band(freqs, psd, fmin, fmax)
+        for name in result:
+            result[name] /= n_channels
+        return result
+
 
 # ================================
-# MJPEG Server
+# MJPEG helper
+# ================================
+def push_mjpeg_stream(handler, get_frame_fn):
+    """
+    Generic MJPEG push loop. Calls get_frame_fn() each tick and pushes
+    the result as a multipart JPEG frame. Runs until the connection drops.
+    """
+    handler.send_response(200)
+    handler.send_header('Content-Type', 'multipart/x-mixed-replace; boundary=frame')
+    handler.send_header('Access-Control-Allow-Origin', '*')
+    handler.end_headers()
+    try:
+        while True:
+            frame = get_frame_fn()
+            if frame is not None:
+                handler.wfile.write(b'--frame\r\n')
+                handler.wfile.write(b'Content-Type: image/jpeg\r\n\r\n')
+                handler.wfile.write(frame)
+                handler.wfile.write(b'\r\n')
+            time.sleep(FRAME_INTERVAL)
+    except (BrokenPipeError, ConnectionResetError):
+        pass
+
+
+# ================================
+# HTTP Server
 # ================================
 class MJPEGHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         pass
 
     def do_GET(self):
-        if self.path == '/stream':
-            self.send_response(200)
-            self.send_header('Content-Type', 'multipart/x-mixed-replace; boundary=frame')
-            self.send_header('Access-Control-Allow-Origin', '*')
-            self.end_headers()
-            try:
-                while True:
-                    with frame_lock:
-                        frame = latest_frame
-                    if frame is not None:
-                        self.wfile.write(b'--frame\r\n')
-                        self.wfile.write(b'Content-Type: image/jpeg\r\n\r\n')
-                        self.wfile.write(frame)
-                        self.wfile.write(b'\r\n')
-                    time.sleep(FRAME_INTERVAL)
-            except (BrokenPipeError, ConnectionResetError):
-                pass
+        path = urllib.parse.urlparse(self.path).path
 
-        elif self.path == '/':
+        # --- Topomap MJPEG stream ---
+        if path == '/stream':
+            def get_topo():
+                with topo_frame_lock:
+                    return latest_topo_frame
+            push_mjpeg_stream(self, get_topo)
+
+        # --- Brainwave MJPEG stream ---
+        elif path == '/waves':
+            def get_wave():
+                with wave_frame_lock:
+                    return latest_wave_frame
+            push_mjpeg_stream(self, get_wave)
+
+        # --- Combined dashboard ---
+        elif path == '/':
             html = b"""<!DOCTYPE html>
-<html><body style="margin:0;background:#000;display:flex;justify-content:center;align-items:center;height:100vh;">
-<img src="/stream" style="width:500px;height:500px;" />
-</body></html>"""
+<html>
+<head>
+  <title>EEG Dashboard</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: #0d0d0d;
+      color: #ccc;
+      font-family: monospace;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      min-height: 100vh;
+      padding: 20px;
+      gap: 16px;
+    }
+    h1 { font-size: 18px; color: #fff; letter-spacing: 2px; margin-bottom: 4px; }
+    .panels {
+      display: flex;
+      gap: 20px;
+      align-items: flex-start;
+      flex-wrap: wrap;
+      justify-content: center;
+    }
+    .panel {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 8px;
+    }
+    .label {
+      font-size: 11px;
+      color: #888;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+    img {
+      border-radius: 8px;
+      border: 1px solid #222;
+    }
+  </style>
+</head>
+<body>
+  <h1>&#9889; Live EEG Dashboard</h1>
+  <div class="panels">
+    <div class="panel">
+      <span class="label">Alpha Topomap</span>
+      <img src="/stream" width="420" height="420" />
+    </div>
+    <div class="panel">
+      <span class="label">Band Power History</span>
+      <img src="/waves" width="700" height="490" />
+    </div>
+  </div>
+</body>
+</html>"""
             self.send_response(200)
             self.send_header('Content-Type', 'text/html')
             self.end_headers()
             self.wfile.write(html)
 
-        elif self.path.startswith('/changestate'):
-            query = urllib.parse.urlparse(self.path).query
+        # --- Change state ---
+        elif path == '/changestate':
+            query  = urllib.parse.urlparse(self.path).query
             params = urllib.parse.parse_qs(query)
             try:
                 new_state = int(params.get('state', [None])[0])
@@ -230,8 +394,9 @@ def start_mjpeg_server(port=STREAM_PORT):
     server = HTTPServer(('0.0.0.0', port), MJPEGHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    print(f"[STREAM] http://localhost:{port}/stream")
-    print(f"[STREAM] http://localhost:{port}/  (preview page)")
+    print(f"[STREAM] http://localhost:{port}/         (dashboard - both streams)")
+    print(f"[STREAM] http://localhost:{port}/stream   (topomap MJPEG)")
+    print(f"[STREAM] http://localhost:{port}/waves    (brainwaves MJPEG)")
 
 
 # ================================
@@ -254,7 +419,7 @@ def setup_lsl_inlet(stream_type, timeout=10.0):
 # Main
 # ================================
 def main():
-    global latest_frame
+    global latest_topo_frame, latest_wave_frame
 
     # Load model
     if not os.path.exists('model.pkl'):
@@ -263,7 +428,6 @@ def main():
         model = pickle.load(f)
     print("[MODEL] Loaded model.pkl")
 
-    # Sanity-check: model must support predict_proba
     if not hasattr(model, 'predict_proba'):
         raise RuntimeError("Model must support predict_proba (use XGBClassifier with softprob).")
 
@@ -277,9 +441,8 @@ def main():
 
     extractor = FeatureExtractor(sfreq=sfreq)
 
-    # Verify feature shape matches what the model expects
-    dummy    = np.zeros((SAMPLES_PER_WINDOW, n_channels))
-    n_feats  = len(extractor.extract_features(dummy))
+    dummy   = np.zeros((SAMPLES_PER_WINDOW, n_channels))
+    n_feats = len(extractor.extract_features(dummy))
     print(f"[INFO] Feature vector length: {n_feats}")
 
     # Sliding window buffer
@@ -293,7 +456,10 @@ def main():
     # Debounce state
     pending_prediction = -1
     consecutive_count  = 0
-    last_action_time   = 0.0   # for cooldown
+    last_action_time   = 0.0
+
+    # Wave render throttle counter
+    strides_since_wave_render = 0
 
     # Channel positions
     ch_names = []
@@ -313,12 +479,11 @@ def main():
     if positions is not None:
         print(f"[VIS] Matched electrodes: {active_names}")
     else:
-        print("[VIS] No channels matched — topomap disabled")
+        print("[VIS] No channels matched -- topomap disabled")
 
-    print("\n[INFERENCE] Running — Ctrl+C to stop\n")
+    print("\n[INFERENCE] Running -- Ctrl+C to stop\n")
 
     while True:
-        # Pull all available samples
         eeg_samples, _ = eeg_inlet.pull_chunk(timeout=0.05)
         if not eeg_samples:
             continue
@@ -327,40 +492,51 @@ def main():
             eeg_buffer.append(sample)
             samples_since_last_win += 1
 
-        # Buffer not yet full
         if len(eeg_buffer) < SAMPLES_PER_WINDOW:
             print(f"[BUFFER] Filling: {len(eeg_buffer)}/{SAMPLES_PER_WINDOW}", end='\r')
             samples_since_last_win = 0
             continue
 
-        # Haven't advanced enough for next stride yet
         if samples_since_last_win < WINDOW_STRIDE:
             continue
 
         samples_since_last_win = 0
+        strides_since_wave_render += 1
 
-        # ---- Extract features ----
-        window_data = np.array(eeg_buffer)   # (SAMPLES_PER_WINDOW, n_channels)
+        window_data = np.array(eeg_buffer)
         features    = extractor.extract_features(window_data)
 
-        # ---- Update topomap ----
+        # ---- Update topomap (every stride) ----
         if positions is not None:
             alpha_values = [
                 extractor.band_power_single(window_data[:, idx], 8, 13)
                 for idx in active_indices
             ]
             rgb  = interpolate_topomap(positions, alpha_values)
-            jpeg = frame_to_jpeg(rgb)
-            with frame_lock:
-                latest_frame = jpeg
+            jpeg = rgb_to_jpeg(rgb)
+            with topo_frame_lock:
+                latest_topo_frame = jpeg
 
+        # ---- Update band-power history (every stride) ----
+        band_powers = extractor.all_band_powers(window_data)
+        with wave_hist_lock:
+            for band_name, power in band_powers.items():
+                wave_history[band_name].append(power)
+
+        # ---- Re-render wave plot (throttled to every Nth stride) ----
+        if strides_since_wave_render >= WAVE_RENDER_EVERY:
+            strides_since_wave_render = 0
+            jpeg = render_wave_jpeg()
+            with wave_frame_lock:
+                latest_wave_frame = jpeg
+
+        # ---- Model inference ----
         raw_pred  = int(model.predict(features.reshape(1, -1))[0])
         raw_proba = model.predict_proba(features.reshape(1, -1))[0]
 
         prediction_buffer.append(raw_pred)
         prob_buffer.append(raw_proba)
 
-        # ---- Majority vote ----
         if len(prediction_buffer) < VOTE_BUFFER_SIZE:
             print(f"[VOTE] Buffering ({len(prediction_buffer)}/{VOTE_BUFFER_SIZE})...", end='\r')
             continue
@@ -375,11 +551,10 @@ def main():
               f"consecutive={consecutive_count}/{CONSECUTIVE_THRESHOLD}  "
               f"counts={dict(counts)}")
 
-        # ---- Debounce: require CONSECUTIVE_THRESHOLD agreements ----
+        # ---- Debounce ----
         if majority_prediction == pending_prediction:
             consecutive_count += 1
         else:
-            # New prediction — reset counter (start at 0, not 1, so threshold is truly honoured)
             pending_prediction = majority_prediction
             consecutive_count  = 0
             continue
@@ -416,14 +591,13 @@ def main():
                 last_action_time = now
 
         try:
-            requests.post("http://localhost:8765", data={state:asl_state})
+            requests.post("http://localhost:8765", data={state: asl_state})
         except:
             pass
 
-        # Reset debounce after firing so next action requires fresh agreement
+        # Reset debounce after firing
         consecutive_count  = 0
         pending_prediction = -1
-
 
 
 if __name__ == '__main__':

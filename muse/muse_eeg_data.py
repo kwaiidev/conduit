@@ -15,7 +15,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 # ================================
 # Configuration
 # ================================
-LABEL_MODE         = 1          # Set this before running: 0=idle, 1=left-click, 2=right-click, 3=other
+LABEL_MODE         = 3          # Set this before running: 0=idle, 1=left-click, 2=right-click, 3=other
 SAMPLES_PER_WINDOW = 256        # 1 full second at 256 Hz — better frequency resolution
 WINDOW_STRIDE      = 64         # Slide window by 64 samples (75% overlap) — more training data
 STREAM_PORT        = 5000
