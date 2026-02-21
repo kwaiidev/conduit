@@ -179,7 +179,7 @@ def _parse_gemini_response(text: str) -> dict:
 
     type_match = re.search(r"^TYPE:\s*(.+)$", text, re.MULTILINE)
     value_match = re.search(r"^VALUE:\s*(.*)$", text, re.MULTILINE)
-    code_match = re.search(r"^CODE:\s*\n(.*?)^END_CODE", text, re.MULTILINE | re.DOTALL)
+    code_match = re.search(r"^CODE:\s*\n(.*?)(?:^END_CODE|\Z)", text, re.MULTILINE | re.DOTALL)
 
     if type_match:
         result["type"] = type_match.group(1).strip().lower()
@@ -449,10 +449,11 @@ class VoiceAgent:
                 config=genai_types.GenerateContentConfig(
                     system_instruction=CLEAN_SYSTEM_PROMPT,
                     temperature=0.0,
-                    max_output_tokens=512,
+                    max_output_tokens=4096,
                 ),
             )
             text = (response.text or "").strip()
+            print(f"[Gemini raw response]\n{text}\n[/Gemini raw response]")
             return _parse_gemini_response(text)
 
         loop = asyncio.get_running_loop()
