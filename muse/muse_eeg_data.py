@@ -18,7 +18,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 WINDOW_LENGTH      = 5
 SAMPLES_PER_WINDOW = 128
 OVERLAP_SAMPLES    = 32
-LABEL_MODE         = 1
+LABEL_MODE         = 3
 COUNT              = 0
 STREAM_PORT        = 5000
 FRAME_INTERVAL     = 0.01   # seconds between frames (~20fps)
