@@ -3,18 +3,24 @@ import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 from pylsl import StreamInlet, resolve_byprop
 from scipy import signal
+from scipy.interpolate import RBFInterpolator
 import csv
 import os
+import time
 from collections import deque
 
-WINDOW_LENGTH = 5  
-EEG_OFFSET = 100
-ACC_Y_RANGE = [-1.5, 1.5]
+WINDOW_LENGTH      = 5
+SAMPLES_PER_WINDOW = 128
+OVERLAP_SAMPLES    = 32
+LABEL_MODE         = 1
+COUNT              = 0
 
-SAMPLES_PER_WINDOW = 128  
-OVERLAP_SAMPLES = 0      
-LABEL_MODE = 1
-COUNT = 0
+CHANNEL_POSITIONS = {
+    "TP9":  (-0.72, -0.28),
+    "AF7":  (-0.55,  0.75),
+    "AF8":  ( 0.55,  0.75),
+    "TP10": ( 0.72, -0.28),
+}
 
 class FeatureExtractor:
     def __init__(self, sfreq=256):
@@ -23,163 +29,188 @@ class FeatureExtractor:
     def extract_features(self, data):
         n_samples, n_channels = data.shape
         features = []
-
         for ch in range(n_channels):
-            channel_data = data[:, ch]
-
-            features.append(np.mean(channel_data))
-            features.append(np.std(channel_data))
-            features.append(np.max(channel_data) - np.min(channel_data))
-
-            freqs, psd = signal.welch(channel_data, fs=self.sfreq, nperseg=min(64, n_samples))
-
-            delta = self._band_power(freqs, psd, 1, 4)
-            theta = self._band_power(freqs, psd, 4, 8)
-            alpha = self._band_power(freqs, psd, 8, 13)
-            beta = self._band_power(freqs, psd, 13, 30)
-            gamma = self._band_power(freqs, psd, 30, 50)
-
+            d = data[:, ch]
+            features.append(np.mean(d))
+            features.append(np.std(d))
+            features.append(np.ptp(d))
+            freqs, psd = signal.welch(d, fs=self.sfreq, nperseg=min(64, n_samples))
+            delta = self._band(freqs, psd, 1,  4)
+            theta = self._band(freqs, psd, 4,  8)
+            alpha = self._band(freqs, psd, 8,  13)
+            beta  = self._band(freqs, psd, 13, 30)
+            gamma = self._band(freqs, psd, 30, 50)
             features.extend([delta, theta, alpha, beta, gamma])
-
-            features.append(beta / alpha if alpha > 0 else 0)
+            features.append(beta  / alpha if alpha > 0 else 0)
             features.append(theta / alpha if alpha > 0 else 0)
-
         return np.array(features)
 
-    def _band_power(self, freqs, psd, fmin, fmax):
-        """Calculate power in a frequency band"""
-        idx = np.logical_and(freqs >= fmin, freqs <= fmax)
-        return np.trapezoid(psd[idx], freqs[idx])
+    def _band(self, freqs, psd, fmin, fmax):
+        idx = (freqs >= fmin) & (freqs <= fmax)
+        return float(np.trapezoid(psd[idx], freqs[idx])) if idx.any() else 0.0
+
+    def band_power_single(self, data, fmin, fmax):
+        freqs, psd = signal.welch(data, fs=self.sfreq, nperseg=min(64, len(data)))
+        return self._band(freqs, psd, fmin, fmax)
 
 
-def setup_lsl_inlet(stream_type):
-    """Resolve and return an LSL stream inlet."""
-    print(f"Looking for a {stream_type} stream...")
-    streams = resolve_byprop('type', stream_type, 1, 1.0)
+def setup_lsl_inlet(stream_type='EEG', timeout=5.0):
+    print(f"[LSL] Searching for '{stream_type}' stream...")
+    streams = resolve_byprop('type', stream_type, 1, timeout)
     if not streams:
-        raise RuntimeError(f"Unable to find {stream_type} stream. Make sure muselsl is streaming.")
-
+        raise RuntimeError(f"[LSL] No '{stream_type}' stream found.")
     inlet = StreamInlet(streams[0], max_buflen=WINDOW_LENGTH)
-    print(f"{stream_type} stream found!")
+    print(f"[LSL] Stream connected.")
     return inlet
 
 
+GRID_RES = 300
+xi = np.linspace(-1.0, 1.0, GRID_RES)
+yi = np.linspace(-1.0, 1.0, GRID_RES)
+grid_x, grid_y = np.meshgrid(xi, yi)
+brain_mask = (grid_x**2 + grid_y**2) <= 1.0
+grid_pts_inside = np.column_stack([grid_x[brain_mask], grid_y[brain_mask]])
+
+def interpolate_topomap(positions, values):
+    v = np.array(values, dtype=float)
+    ptp = np.ptp(v)
+    v = (v - v.min()) / ptp if ptp > 1e-9 else np.full_like(v, 0.5)
+    rbf = RBFInterpolator(positions, v, kernel='thin_plate_spline', smoothing=0)
+    grid_z = np.full(grid_x.shape, np.nan)
+    grid_z[brain_mask] = rbf(grid_pts_inside)
+    return grid_z
+
+
 def main():
-    eeg_inlet = setup_lsl_inlet('EEG')
+    global COUNT
 
-    eeg_info = eeg_inlet.info()
+    eeg_inlet  = setup_lsl_inlet('EEG')
+    info       = eeg_inlet.info()
+    sfreq      = int(info.nominal_srate())
+    n_channels = info.channel_count()
+    print(f"[INFO] Sample rate: {sfreq} Hz | Channels: {n_channels}")
 
-    eeg_sfreq = int(eeg_info.nominal_srate())
-
-    n_channels_eeg = eeg_info.channel_count()
-
-    # Initialize feature extractor
-    extractor = FeatureExtractor(sfreq=eeg_sfreq)
-
-    # Initialize Data Buffers
-    eeg_buffer_size = int(eeg_sfreq * WINDOW_LENGTH)
-
-    eeg_data = np.zeros((eeg_buffer_size, n_channels_eeg))
-    eeg_window_buffer = deque(maxlen=SAMPLES_PER_WINDOW)
+    extractor  = FeatureExtractor(sfreq)
+    eeg_buffer = deque(maxlen=SAMPLES_PER_WINDOW)
     samples_since_last_save = 0
 
-    eeg_timestamps = np.linspace(-WINDOW_LENGTH, 0, eeg_buffer_size)
-
-    fig, ax1 = plt.subplots(figsize=(12, 6))
-
-    # EEG Plot
-    eeg_lines = []
-    for i in range(n_channels_eeg):
-        line, = ax1.plot(eeg_timestamps, eeg_data[:, i] + (i * EEG_OFFSET), lw=1)
-        eeg_lines.append(line)
-
-    ax1.set_title(f'EEG Channels - Collecting Label: {LABEL_MODE}')
-    ax1.set_ylabel('Voltage (uV) + Offset')
-    ax1.set_ylim(-EEG_OFFSET, n_channels_eeg * EEG_OFFSET)
-    ax1.set_yticks([i * EEG_OFFSET for i in range(n_channels_eeg)])
-
-    # Get channel names
+    # Channel names from stream info
     ch_names = []
-    channels = eeg_info.desc().child("channels")
-    ch = channels.child("channel")
-    for i in range(n_channels_eeg):
-        ch_names.append(ch.child_value("label"))
-        ch = ch.next_sibling("channel")
-    ax1.set_yticklabels(ch_names)
-    ax1.grid(True, linestyle='--', alpha=0.6)
-    ax1.invert_yaxis()
+    ch_node  = info.desc().child("channels").child("channel")
+    for _ in range(n_channels):
+        ch_names.append(ch_node.child_value("label"))
+        ch_node = ch_node.next_sibling("channel")
 
-    # Real-time Update Function
-    def update(frame):
-        nonlocal samples_since_last_save
-        global COUNT
+    active_names, active_positions, active_indices = [], [], []
+    for i, name in enumerate(ch_names):
+        if name in CHANNEL_POSITIONS:
+            active_names.append(name)
+            active_positions.append(CHANNEL_POSITIONS[name])
+            active_indices.append(i)
 
-        # Update EEG Data
-        eeg_samples, _ = eeg_inlet.pull_chunk(timeout=0.0, max_samples=eeg_buffer_size)
+    if not active_indices:
+        raise RuntimeError(f"No channels matched. Stream has: {ch_names}")
 
-        if eeg_samples:
-            eeg_samples_arr = np.array(eeg_samples)
+    positions = np.array(active_positions)
+    print(f"[INFO] Matched electrodes: {active_names}")
 
-            # Add samples to rolling buffer
-            for sample in eeg_samples_arr:
-                eeg_window_buffer.append(sample)
-                samples_since_last_save += 1
-
-            # Save features when we have enough samples and reached overlap threshold
-            if len(eeg_window_buffer) == SAMPLES_PER_WINDOW and samples_since_last_save >= OVERLAP_SAMPLES:
-                window_data = np.array(list(eeg_window_buffer))
-
-                # Extract features
-                features = extractor.extract_features(window_data)
-
-                # Add label
-                labeled_data = np.append(features, LABEL_MODE)
-
-                # Append to CSV
-                with open('eeg_features.csv', 'a', newline='') as f:
-                    writer = csv.writer(f)
-                    writer.writerow(labeled_data)
-                    COUNT += 1
-
-                samples_since_last_save = 0
-                print(f"Saved window - Label: {LABEL_MODE}, Features: {len(features)}, Count: {COUNT}")
-
-            # Update plot
-            new_samples_count = len(eeg_samples)
-            eeg_data[:] = np.roll(eeg_data, -new_samples_count, axis=0)
-            eeg_data[-new_samples_count:, :] = eeg_samples
-
-            for i in range(n_channels_eeg):
-                eeg_lines[i].set_ydata(eeg_data[:, i] + (i * EEG_OFFSET))
-
-        return eeg_lines
-
-    # Create CSV with header
-    filename = 'eeg_features.csv'
+    # CSV
+    filename = "eeg_features.csv"
     if not os.path.exists(filename):
-        # Generate header for features
-        feature_names = []
-        for ch in range(n_channels_eeg):
-            feature_names.extend([
+        cols = []
+        for ch in range(n_channels):
+            cols.extend([
                 f'ch{ch}_mean', f'ch{ch}_std', f'ch{ch}_range',
                 f'ch{ch}_delta', f'ch{ch}_theta', f'ch{ch}_alpha',
                 f'ch{ch}_beta', f'ch{ch}_gamma',
                 f'ch{ch}_beta_alpha_ratio', f'ch{ch}_theta_alpha_ratio'
-                ])
-        feature_names.append('label')
-
+            ])
+        cols.append("label")
         with open(filename, 'w', newline='') as f:
-            writer = csv.writer(f)
-            writer.writerow(feature_names)
+            csv.writer(f).writerow(cols)
+        print(f"[CSV] Created '{filename}' ({len(cols)-1} features + label)")
 
-        print(f"Created {filename} with {len(feature_names)-1} features")
+    fig = plt.figure(figsize=(5, 5), facecolor='black')
+    ax  = fig.add_axes([0, 0, 1, 1])  # axes fill the entire figure
+    ax.set_facecolor('black')
+    ax.axis('off')
+    ax.set_xlim(-1, 1)
+    ax.set_ylim(-1, 1)
+    ax.set_aspect('equal')
 
-    ani = animation.FuncAnimation(fig, update, blit=True, interval=30, cache_frame_data=False)
+    heatmap = ax.imshow(
+        np.full(grid_x.shape, np.nan),
+        extent=(-1, 1, -1, 1),
+        origin='lower',
+        cmap='plasma',
+        vmin=0, vmax=1,
+        interpolation='bilinear',
+        zorder=1,
+        aspect='equal'
+    )
+
+    def update(frame):
+        nonlocal samples_since_last_save
+        global COUNT
+
+        samples, _ = eeg_inlet.pull_chunk(timeout=0.0)
+        if samples:
+            for s in samples:
+                eeg_buffer.append(s)
+                samples_since_last_save += 1
+
+        buf_len = len(eeg_buffer)
+        if buf_len < SAMPLES_PER_WINDOW:
+            print(f"[BUFFER] {buf_len}/{SAMPLES_PER_WINDOW} samples", end='\r')
+            return [heatmap]
+
+        window_data = np.array(eeg_buffer)
+
+        # Save features & log
+        if samples_since_last_save >= OVERLAP_SAMPLES:
+            features = extractor.extract_features(window_data)
+            with open(filename, 'a', newline='') as f:
+                csv.writer(f).writerow(np.append(features, LABEL_MODE))
+            COUNT += 1
+            samples_since_last_save = 0
+
+            alpha_vals = {
+                active_names[j]: extractor.band_power_single(window_data[:, idx], 8, 13)
+                for j, idx in enumerate(active_indices)
+            }
+            beta_vals = {
+                active_names[j]: extractor.band_power_single(window_data[:, idx], 13, 30)
+                for j, idx in enumerate(active_indices)
+            }
+            alpha_str = "  ".join(f"{n}={v:.3f}" for n, v in alpha_vals.items())
+            beta_str  = "  ".join(f"{n}={v:.3f}" for n, v in beta_vals.items())
+            ts = time.strftime("%H:%M:%S")
+            print(f"[{ts}] label={LABEL_MODE}  window={COUNT:04d}")
+            print(f"         alpha -> {alpha_str}")
+            print(f"         beta  -> {beta_str}")
+
+        # Heatmap update
+        alpha_values = [
+            extractor.band_power_single(window_data[:, idx], 8, 13)
+            for idx in active_indices
+        ]
+        grid_z = interpolate_topomap(positions, alpha_values)
+        heatmap.set_data(grid_z)
+
+        return [heatmap]
+
+    ani = animation.FuncAnimation(
+        fig, update,
+        interval=50,
+        blit=True,
+        cache_frame_data=False
+    )
+
     plt.show()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     try:
         main()
     except RuntimeError as e:
-        print(e)
+        print(f"\n[ERROR] {e}")
