@@ -3,3 +3,5 @@ mediapipe
 numpy
 scipy
 keyboard
+pyautogui
+pynput
