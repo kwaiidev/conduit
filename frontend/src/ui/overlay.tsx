@@ -8,6 +8,7 @@ import {
   Settings,
   Power,
   Maximize2,
+  Hand,
 } from "lucide-react";
 
 export default function OverlayBar() {
@@ -17,6 +18,8 @@ export default function OverlayBar() {
   const [rightJawSignal, setRightJawSignal] = useState(false);
   const [voiceOn, setVoiceOn] = useState(false);
   const [opticOpen, setOpticOpen] = useState(false);
+  const [aslOn, setAslOn] = useState(false);
+  
 
   // Simulate jaw signals for demo (hum on/off soft pink). Replace with real EEG/sensor data.
   useEffect(() => {
@@ -93,19 +96,32 @@ export default function OverlayBar() {
       </button>
 
       {/* Optic keyboard toggle */}
-      <button
-        type="button"
-        onClick={() => setOpticOpen((o) => !o)}
-        style={styles.iconButton}
-        title={opticOpen ? "Close optic keyboard" : "Open optic keyboard"}
-      >
-        <Keyboard
-          size={22}
-          style={{ color: opticOpen ? "var(--pink, #FF2D8D)" : "#9ca3af" }}
-        />
-        <span style={styles.iconLabel}>OPTIC</span>
-      </button>
+<button
+  type="button"
+  onClick={() => setOpticOpen((o) => !o)}
+  style={styles.iconButton}
+  title={opticOpen ? "Close optic keyboard" : "Open optic keyboard"}
+>
+  <Keyboard
+    size={22}
+    style={{ color: opticOpen ? "var(--pink, #FF2D8D)" : "#9ca3af" }}
+  />
+  <span style={styles.iconLabel}>OPTIC</span>
+</button>
 
+{/* ASL to Text toggle */}
+<button
+  type="button"
+  onClick={() => setAslOn((a) => !a)}
+  style={styles.iconButton}
+  title={aslOn ? "ASL to Text enabled" : "Enable ASL to Text"}
+>
+  <Hand
+    size={22}
+    style={{ color: aslOn ? "var(--pink, #FF2D8D)" : "#9ca3af" }}
+  />
+  <span style={styles.iconLabel}>ASL</span>
+</button>
       {/* Mode: SAFE PASSIVE */}
       <div style={styles.modePill}>
         <span style={styles.modeDot} />

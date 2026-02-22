@@ -4,6 +4,10 @@ import { motion } from "motion/react";
 import { Sun, Moon } from "lucide-react";
 import { useTheme } from "../context/ThemeContext";
 import { setCompletedOnboarding } from "../state/onboarding";
+import { JawClenchTrainingMiddle } from "./onboarding/jawmiddle";
+import { JawClenchTrainingRight } from "./onboarding/jawright";
+import { JawClenchTrainingLeft } from "./onboarding/jawleft";
+import { JawClenchTrainingSlack } from "./onboarding/jawslack";
 
 export default function Onboarding() {
   const nav = useNavigate();
@@ -48,9 +52,7 @@ export default function Onboarding() {
 
       <div className="onboarding-content">
         <div key={animationKey} className="onboarding-inner">
-          <div className="step-indicator">
-            Step {step + 1} of {steps.length}
-          </div>
+          
 
           {isWelcomeStep ? (
             <>
@@ -130,7 +132,7 @@ export default function Onboarding() {
 const steps = [
   {
     title: "Welcome to Conduit",
-    description: "Control your device using brainwave patterns detected through EEG.",
+    description: "You can do anything you put your mind to.",
     content: <div className="placeholder-content">🧠 Welcome screen</div>,
   },
   {
@@ -141,12 +143,24 @@ const steps = [
   {
     title: "Calibrate Baseline",
     description: "Relax and clear your mind while we establish your baseline brainwave patterns.",
-    content: <div className="placeholder-content">📊 Baseline calibration UI goes here</div>,
+    content: <JawClenchTrainingSlack />,
   },
   {
-    title: "Train Control Patterns",
-    description: "Follow the prompts to train different brainwave patterns for control.",
-    content: <div className="placeholder-content">🎯 Pattern training UI goes here</div>,
+    title: "Train Left Jaw Clench",
+    description: "Click or hover over 'Start' for 3 seconds to begin training.",
+    content: <JawClenchTrainingLeft />,
+  },
+  {
+    title: "Train Right Jaw Clench",
+    description: "Click or hover over 'Start' for 3 seconds to begin training.",
+    content: <JawClenchTrainingRight />,
+
+  },
+  {
+    title: "Train Middle Jaw Clench",
+    description: "Click or hover over 'Start' for 3 seconds to begin training.",
+    content: <JawClenchTrainingMiddle />,
+
   },
   {
     title: "All Set!",

@@ -6,6 +6,7 @@ import Shell from './ui/shell';
 import OverlayBar from './ui/overlay';
 import Onboarding from './routes/onboarding';
 import Home from './routes/home';
+import Visuals from './routes/visuals';
 import { hasCompletedOnboarding } from './state/onboarding';
 import '../index.css';
 
@@ -42,6 +43,16 @@ const App: React.FC = () => {
               </ProtectedRoute>
             }
           />
+          <Route
+            path="/visuals"
+            element={
+              <ProtectedRoute>
+                <Shell>
+                  <Visuals />
+                </Shell>
+              </ProtectedRoute>
+            }
+          />
           <Route path="/" element={<Navigate to="/onboarding" replace />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
@@ -49,6 +60,8 @@ const App: React.FC = () => {
     </ThemeProvider>
   );
 };
+
+
 
 // Decides whether to show overlay bar only (overlay window) or full app (router).
 const AppBoot: React.FC = () => {

@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
-import { Home, Settings, Users, Minimize2, Maximize2, Minus, Square, X, Sun, Moon } from "lucide-react";
+import { Home, Settings, BarChart3, Minimize2, Maximize2, Minus, Square, X, Sun, Moon } from "lucide-react";
 import { useTheme } from "../context/ThemeContext";
 
 export default function CompactToolbar() {
@@ -47,9 +47,9 @@ export default function CompactToolbar() {
         />
         <ToolbarButton
           active={false}
-          onClick={() => navigate("/users")}
-          label="Users"
-          icon={Users}
+          onClick={() => navigate("/visuals")}
+          label="Visuals"
+          icon={BarChart3}
         />
         <ToolbarButton
           active={false}
