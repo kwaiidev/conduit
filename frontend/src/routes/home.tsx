@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { enableASL, disableASL, getASLReady } from "../lib/aslcv";
+import { enableVoice, disableVoice, getVoiceReady } from "../lib/voicetts";
 import { motion } from "motion/react";
 import { 
   MousePointer2, 
@@ -33,15 +34,17 @@ export default function Home() {
   const nav = useNavigate();
   const [activeModes, setActiveModes] = useState(['cv-pointer', 'eeg-select']);
 
-  // Sync sign-text toggle with real API state on mount
+  // Sync voice and sign toggles with real API state on mount
   useEffect(() => {
-    getASLReady().then((ready) => {
+    const sync = (id: string, ready: boolean) => {
       setActiveModes((prev) =>
         ready
-          ? prev.includes('sign-text') ? prev : [...prev, 'sign-text']
-          : prev.filter((id) => id !== 'sign-text')
+          ? prev.includes(id) ? prev : [...prev, id]
+          : prev.filter((m) => m !== id)
       );
-    });
+    };
+    getVoiceReady().then((ready) => sync('voice-text', ready));
+    getASLReady().then((ready) => sync('sign-text', ready));
   }, []);
 
   const featureGroups = [
@@ -79,16 +82,17 @@ export default function Home() {
       next ? [...prev, featureId] : prev.filter((id) => id !== featureId)
     );
 
-    if (featureId === 'sign-text') {
+    if (featureId === 'sign-text' || featureId === 'voice-text') {
+      const enable = featureId === 'sign-text' ? enableASL : enableVoice;
+      const disable = featureId === 'sign-text' ? disableASL : disableVoice;
       try {
         if (next) {
-          await enableASL();
+          await enable();
         } else {
-          await disableASL();
+          await disable();
         }
       } catch (e) {
-        console.error("ASL toggle failed:", e);
-        // Revert on failure
+        console.error(`${featureId} toggle failed:`, e);
         setActiveModes((prev) =>
           isCurrentlyActive ? [...prev, featureId] : prev.filter((id) => id !== featureId)
         );

@@ -11,6 +11,7 @@ import {
   Hand,
 } from "lucide-react";
 import { enableASL, disableASL, getASLReady } from "../lib/aslcv";
+import { enableVoice, disableVoice, getVoiceReady } from "../lib/voicetts";
 
 export default function OverlayBar() {
   const [signalStrength] = useState(98);
@@ -21,10 +22,26 @@ export default function OverlayBar() {
   const [opticOpen, setOpticOpen] = useState(false);
   const [aslOn, setAslOn] = useState(false);
 
-  // Sync ASL toggle with real API state on mount
+  // Sync toggles with real API state on mount
   useEffect(() => {
+    getVoiceReady().then(setVoiceOn);
     getASLReady().then(setAslOn);
   }, []);
+
+  const toggleVoice = async () => {
+    const next = !voiceOn;
+    setVoiceOn(next);
+    try {
+      if (next) {
+        await enableVoice();
+      } else {
+        await disableVoice();
+      }
+    } catch (e) {
+      console.error("Voice toggle failed:", e);
+      setVoiceOn(!next);
+    }
+  };
 
   const toggleASL = async () => {
     const next = !aslOn;
@@ -37,7 +54,7 @@ export default function OverlayBar() {
       }
     } catch (e) {
       console.error("ASL toggle failed:", e);
-      setAslOn(!next); // revert on failure
+      setAslOn(!next);
     }
   };
 
@@ -104,7 +121,7 @@ export default function OverlayBar() {
       {/* Voice toggle */}
       <button
         type="button"
-        onClick={() => setVoiceOn((v) => !v)}
+        onClick={toggleVoice}
         style={styles.iconButton}
         title={voiceOn ? "Voice on" : "Voice off"}
       >
