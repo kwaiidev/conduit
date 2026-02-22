@@ -232,6 +232,10 @@ class EyeTrackerService:
         self._startup_debug_interval_s = max(0.2, float(getattr(args, "startup_debug_interval_s", 1.0)))
         self._startup_last_debug_s = 0.0
         self._warmup_debug_interval_s = max(0.1, min(2.0, self._startup_debug_interval_s * 0.5))
+        self._center_calibration_lock = threading.Lock()
+        self._center_calibration_pending = False
+        self._center_calibration_source = ""
+        self._center_calibration_requested_ms = 0
 
         self.cap = self._open_camera_capture(args.camera)
         if self.cap is None:
@@ -1105,6 +1109,78 @@ class EyeTrackerService:
             nose_points_3d=nose_points_3d,
         )
 
+    def _queue_center_calibration_request(self, source: str = "api") -> None:
+        with self._center_calibration_lock:
+            self._center_calibration_pending = True
+            self._center_calibration_source = str(source or "api")
+            self._center_calibration_requested_ms = now_ms()
+
+    def _peek_center_calibration_request(self) -> tuple[bool, str]:
+        with self._center_calibration_lock:
+            return self._center_calibration_pending, self._center_calibration_source
+
+    def _clear_center_calibration_request(self) -> None:
+        with self._center_calibration_lock:
+            self._center_calibration_pending = False
+            self._center_calibration_source = ""
+            self._center_calibration_requested_ms = 0
+
+    def _apply_center_calibration(
+        self,
+        *,
+        w: int,
+        h: int,
+        face_landmarks: Any,
+        head_center: Optional[np.ndarray],
+        R_final: Optional[np.ndarray],
+        nose_points_3d: Optional[np.ndarray],
+        iris_3d_left: np.ndarray,
+        iris_3d_right: np.ndarray,
+        avg_combined_direction: Optional[np.ndarray],
+    ) -> bool:
+        if (
+            face_landmarks is None
+            or head_center is None
+            or R_final is None
+            or nose_points_3d is None
+        ):
+            return False
+
+        self._calibrate_spheres(
+            w,
+            h,
+            head_center,
+            R_final,
+            face_landmarks,
+            iris_3d_left,
+            iris_3d_right,
+            nose_points_3d,
+        )
+        if avg_combined_direction is not None:
+            self._screen_calibrate(avg_combined_direction, face_landmarks)
+        elif self.args.debug:
+            print("[Screen Calibration] Skipped (no combined gaze direction).")
+
+        center_x = int(max(0, min(self.monitor_width - 1, self.center_x)))
+        center_y = int(max(0, min(self.monitor_height - 1, self.center_y)))
+        self.mouse_position = [center_x, center_y]
+        self._stabilized_target = [float(center_x), float(center_y)]
+        self._cursor_pos = (center_x, center_y)
+        self._raw_target_queue.clear()
+        self.x_filter.initialized = False
+        self.y_filter.initialized = False
+        self._last_target_ts = None
+        self._write_screen_position(center_x, center_y)
+        self.mouse_control_enabled = True
+        if self.mouse_control_enabled:
+            if not self._ensure_cursor_backends():
+                print("[Tracker] Cursor setup not available after calibration.")
+            else:
+                self._move_cursor(center_x, center_y)
+        if self.args.debug:
+            print(f"[Cursor Center] Set to target ({center_x}, {center_y}) after screen calibration.")
+        return True
+
     def _read_key(self) -> int:
         if not self.args.debug:
             return 255
@@ -1529,44 +1605,30 @@ class EyeTrackerService:
                 running = False
                 continue
 
-            if key == ord("c"):
+            api_calibration_requested, api_calibration_source = self._peek_center_calibration_request()
+            if key == ord("c") or api_calibration_requested:
                 now = time.time()
-                if now - last_calibration_key >= 0.4 and face_landmarks is not None:
-                    if head_center is not None and R_final is not None and nose_points_3d is not None:
-                        self._calibrate_spheres(
-                            w,
-                            h,
-                            head_center,
-                            R_final,
-                            face_landmarks,
-                            iris_3d_left,
-                            iris_3d_right,
-                            nose_points_3d,
+                if now - last_calibration_key >= 0.4:
+                    calibrated = self._apply_center_calibration(
+                        w=w,
+                        h=h,
+                        face_landmarks=face_landmarks,
+                        head_center=head_center,
+                        R_final=R_final,
+                        nose_points_3d=nose_points_3d,
+                        iris_3d_left=iris_3d_left,
+                        iris_3d_right=iris_3d_right,
+                        avg_combined_direction=avg_combined_direction,
+                    )
+                    if calibrated:
+                        last_calibration_key = now
+                        if api_calibration_requested:
+                            self._clear_center_calibration_request()
+                    elif api_calibration_requested and self.args.debug:
+                        print(
+                            "[Screen Calibration] Deferred queued request "
+                            f"(source={api_calibration_source or 'api'}) until face/pose data is stable."
                         )
-                        if avg_combined_direction is not None:
-                            self._screen_calibrate(avg_combined_direction, face_landmarks)
-                        elif self.args.debug:
-                            print("[Screen Calibration] Skipped (no combined gaze direction).")
-
-                        center_x = int(max(0, min(self.monitor_width - 1, self.center_x)))
-                        center_y = int(max(0, min(self.monitor_height - 1, self.center_y)))
-                        self.mouse_position = [center_x, center_y]
-                        self._stabilized_target = [float(center_x), float(center_y)]
-                        self._cursor_pos = (center_x, center_y)
-                        self._raw_target_queue.clear()
-                        self.x_filter.initialized = False
-                        self.y_filter.initialized = False
-                        self._last_target_ts = None
-                        self._write_screen_position(center_x, center_y)
-                        self.mouse_control_enabled = True
-                        if self.mouse_control_enabled:
-                            if not self._ensure_cursor_backends():
-                                print("[Tracker] Cursor setup not available after calibration.")
-                            else:
-                                self._move_cursor(center_x, center_y)
-                        if self.args.debug:
-                            print(f"[Cursor Center] Set to target ({center_x}, {center_y}) after screen calibration.")
-                    last_calibration_key = now
 
             if key == ord("s") and avg_combined_direction is not None:
                 self._screen_calibrate(avg_combined_direction, face_landmarks)
@@ -1986,6 +2048,15 @@ class EyeTrackerService:
                     service._set_cv_processing(value)
             return service._http_state()
 
+        @app.post("/calibrate/center", summary="Queue a center calibration request")
+        async def calibrate_center():
+            service._queue_center_calibration_request(source="api")
+            return {
+                "status": "ok",
+                "queued": True,
+                "message": "Center calibration request queued.",
+            }
+
         @app.get("/video", summary="MJPEG frame stream for <img src> overlays")
         @app.get("/stream", summary="MJPEG frame stream (legacy alias)")
         async def stream():
@@ -2265,12 +2336,46 @@ class EyeTrackerService:
                     service._set_cv_processing(False)
                     self._send_json({"status": "ok", "processing": False})
                     return
-                self.send_error(404, "Not found")
+                self._send_json({"status": "error", "message": "Not found"}, status=404)
 
             def do_POST(self) -> None:
                 parsed = urlparse(self.path)
                 path = (parsed.path or "/").rstrip("/") or "/"
                 query = parse_qs(parsed.query)
+                if path == "/processing/enable":
+                    service._set_cv_processing(True)
+                    self._send_json({"status": "ok", "processing": True})
+                    return
+                if path == "/processing/disable":
+                    service._set_cv_processing(False)
+                    self._send_json({"status": "ok", "processing": False})
+                    return
+                if path == "/stream/enable":
+                    service._set_http_streaming(True)
+                    self._send_json({"status": "ok", "streaming": True})
+                    return
+                if path == "/stream/disable":
+                    service._set_http_streaming(False)
+                    self._send_json({"status": "ok", "streaming": False})
+                    return
+                if path == "/mouse/enable":
+                    service._set_mouse_control(True)
+                    self._send_json({"status": "ok", "mouse_control": True})
+                    return
+                if path == "/mouse/disable":
+                    service._set_mouse_control(False)
+                    self._send_json({"status": "ok", "mouse_control": False})
+                    return
+                if path == "/calibrate/center":
+                    service._queue_center_calibration_request(source="api")
+                    self._send_json(
+                        {
+                            "status": "ok",
+                            "queued": True,
+                            "message": "Center calibration request queued.",
+                        }
+                    )
+                    return
                 if path == "/state":
                     body = self._read_json()
                     if "state" in body and isinstance(body["state"], int):
@@ -2416,7 +2521,7 @@ class EyeTrackerService:
                         }
                     )
                     return
-                self.send_error(404, "Not found")
+                self._send_json({"status": "error", "message": "Not found"}, status=404)
 
         return EyeTrackerHTTPHandler
 
@@ -2508,6 +2613,8 @@ class EyeTrackerService:
         return {
             "success": True,
             "status": "ok",
+            "screen_width": self.monitor_width,
+            "screen_height": self.monitor_height,
             "typing_enabled": self._typing_enabled,
             "mouse_control": self.mouse_control_enabled,
             "processing": self._cv_processing_enabled,

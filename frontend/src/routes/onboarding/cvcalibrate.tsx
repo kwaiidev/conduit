@@ -3,6 +3,9 @@ import { motion } from "motion/react";
 
 const CV_API_BASE = "http://127.0.0.1:8767";
 const STATUS_POLL_MS = 500;
+const CENTER_LOCK_MS = 1800;
+const CENTER_NORM_RADIUS = 0.2;
+const CENTER_PROGRESS_DECAY = 0.08;
 
 type CalibrationPhase = "idle" | "booting" | "ready" | "error";
 
@@ -10,6 +13,17 @@ type CameraStatusPayload = {
   camera_ready?: boolean;
   camera_status?: string;
   camera_last_valid_frame_ms?: number;
+  screen_width?: number;
+  screen_height?: number;
+  last_event?: {
+    intent?: string;
+    payload?: {
+      x_norm?: number;
+      y_norm?: number;
+      target_x?: number;
+      target_y?: number;
+    };
+  } | null;
 };
 
 async function callCvApi(path: string, init?: RequestInit): Promise<Response> {
@@ -32,6 +46,34 @@ async function callCvApi(path: string, init?: RequestInit): Promise<Response> {
   } finally {
     window.clearTimeout(timeout);
   }
+}
+
+async function setCvState(state: {
+  processing?: boolean;
+  streaming?: boolean;
+  mouse_control?: boolean;
+}): Promise<void> {
+  await callCvApi("/state", {
+    method: "POST",
+    body: JSON.stringify(state),
+  });
+}
+
+async function setCvStateWithRetry(
+  state: { processing?: boolean; streaming?: boolean; mouse_control?: boolean },
+  retries = 6
+): Promise<void> {
+  let lastError: unknown = null;
+  for (let attempt = 0; attempt < retries; attempt += 1) {
+    try {
+      await setCvState(state);
+      return;
+    } catch (error) {
+      lastError = error;
+      await new Promise(resolve => window.setTimeout(resolve, 300));
+    }
+  }
+  throw lastError ?? new Error("Unable to set CV state.");
 }
 
 function describeCameraStatus(raw: string | undefined): string {
@@ -74,13 +116,19 @@ function describeCameraStatus(raw: string | undefined): string {
 
 export function CVCursorCalibrationCenter() {
   const [isCalibrating, setIsCalibrating] = React.useState(false);
+  const [backendReachable, setBackendReachable] = React.useState(false);
+  const [isOnCenter, setIsOnCenter] = React.useState(false);
+  const [centerLocked, setCenterLocked] = React.useState(false);
   const [phase, setPhase] = React.useState<CalibrationPhase>("idle");
   const [statusMessage, setStatusMessage] = React.useState("Press Start to initialize the CV camera.");
   const [streamNonce, setStreamNonce] = React.useState(() => Date.now());
   const [streamAttempt, setStreamAttempt] = React.useState(0);
   const [lastFrameLoadMs, setLastFrameLoadMs] = React.useState(0);
+  const [centerLockProgress, setCenterLockProgress] = React.useState(0);
   const refreshCooldownRef = React.useRef(0);
   const lastBackendFrameMsRef = React.useRef(0);
+  const centerReadySinceMsRef = React.useRef<number | null>(null);
+  const statusErrorStreakRef = React.useRef(0);
 
   const refreshStream = React.useCallback((reason: string) => {
     const now = Date.now();
@@ -94,39 +142,73 @@ export function CVCursorCalibrationCenter() {
 
   const startCalibration = async () => {
     setIsCalibrating(true);
+    setBackendReachable(false);
+    setIsOnCenter(false);
+    setCenterLocked(false);
     setPhase("booting");
     setStatusMessage("Starting camera stream...");
     setStreamNonce(Date.now());
     setStreamAttempt(0);
     setLastFrameLoadMs(0);
+    setCenterLockProgress(0);
+    centerReadySinceMsRef.current = null;
+    statusErrorStreakRef.current = 0;
     lastBackendFrameMsRef.current = 0;
+    let launchDebugMessage = "";
     try {
-      await Promise.all([
-        callCvApi("/stream/enable", { method: "POST" }),
-        callCvApi("/processing/enable", { method: "POST" }),
-      ]);
+      setStatusMessage("Launching CV backend...");
+      const launchResult = await window.electron.startCvBackend({ camera: 0 });
+      launchDebugMessage = launchResult.message ?? "";
+      if (!launchResult.ok) {
+        throw new Error(launchResult.message || "Failed to launch backend.");
+      }
+      console.info("[CV Calibration] backend launch:", launchResult.message);
+
+      setBackendReachable(true);
+      await setCvStateWithRetry({
+        streaming: true,
+        processing: true,
+        mouse_control: false,
+      });
+      setStatusMessage("Camera online. Look at the center target to calibrate.");
     } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      setBackendReachable(false);
+      setIsOnCenter(false);
+      setCenterLocked(false);
       setPhase("error");
       setStatusMessage(
-        "Cannot reach eye-gaze service at 127.0.0.1:8767. Start eyegaze service and retry."
+        `Cannot start eye-gaze service. ${detail}`.trim()
       );
+      if (launchDebugMessage) {
+        console.error("[CV Calibration] backend launch details:", launchDebugMessage);
+      }
       console.error("[CV Calibration] startup request failed:", error);
     }
   };
 
   const stopCalibration = async () => {
     setIsCalibrating(false);
+    setBackendReachable(false);
+    setIsOnCenter(false);
+    setCenterLocked(false);
     setPhase("idle");
     setStatusMessage("Calibration paused.");
+    setCenterLockProgress(0);
+    centerReadySinceMsRef.current = null;
+    statusErrorStreakRef.current = 0;
     try {
-      await callCvApi("/processing/disable", { method: "POST" });
+      await setCvState({
+        processing: false,
+        mouse_control: false,
+      });
     } catch (error) {
       console.error("[CV Calibration] failed to stop processing:", error);
     }
   };
 
   React.useEffect(() => {
-    if (!isCalibrating) {
+    if (!isCalibrating || !backendReachable) {
       return undefined;
     }
 
@@ -139,31 +221,111 @@ export function CVCursorCalibrationCenter() {
         if (!active) {
           return;
         }
+        statusErrorStreakRef.current = 0;
         if (typeof payload.camera_last_valid_frame_ms === "number") {
           lastBackendFrameMsRef.current = payload.camera_last_valid_frame_ms;
         }
         const cameraReady = Boolean(payload.camera_ready);
-        setPhase(cameraReady ? "ready" : "booting");
         if (cameraReady) {
+          if (centerLocked) {
+            setIsOnCenter(true);
+            setCenterLockProgress(1);
+            setPhase("ready");
+            setStatusMessage("Center lock complete. Calibration is ready.");
+            return;
+          }
           const nowMs = Date.now();
           const backendFrameAge = nowMs - (lastBackendFrameMsRef.current || nowMs);
           if (backendFrameAge > 1800) {
+            centerReadySinceMsRef.current = null;
+            setCenterLockProgress(0);
+            setIsOnCenter(false);
             refreshStream("Stream reconnecting to latest camera frame...");
             setPhase("booting");
             return;
           }
-          setStatusMessage("Camera ready. Hold your gaze at the center target.");
+
+          const event = payload.last_event ?? null;
+          const intent = event?.intent ?? "";
+          const payloadXNorm = event?.payload?.x_norm;
+          const payloadYNorm = event?.payload?.y_norm;
+          const payloadTargetX = event?.payload?.target_x;
+          const payloadTargetY = event?.payload?.target_y;
+
+          let xNorm = payloadXNorm;
+          let yNorm = payloadYNorm;
+          if (
+            (typeof xNorm !== "number" || typeof yNorm !== "number")
+            && typeof payloadTargetX === "number"
+            && typeof payloadTargetY === "number"
+            && typeof payload.screen_width === "number"
+            && typeof payload.screen_height === "number"
+            && payload.screen_width > 1
+            && payload.screen_height > 1
+          ) {
+            xNorm = Math.max(0, Math.min(1, payloadTargetX / (payload.screen_width - 1)));
+            yNorm = Math.max(0, Math.min(1, payloadTargetY / (payload.screen_height - 1)));
+          }
+
+          const hasNorm = typeof xNorm === "number" && typeof yNorm === "number";
+          if (!hasNorm) {
+            centerReadySinceMsRef.current = null;
+            setIsOnCenter(false);
+            setCenterLockProgress(prev => Math.max(0, prev - CENTER_PROGRESS_DECAY));
+            setPhase("booting");
+            if (intent === "noop") {
+              setStatusMessage("Face not detected yet. Keep your face centered and look at the target.");
+            } else {
+              setStatusMessage("Camera ready. Keep your eyes open and look at the center target.");
+            }
+            return;
+          }
+
+          const dx = Number(xNorm) - 0.5;
+          const dy = Number(yNorm) - 0.5;
+          const dist = Math.hypot(dx, dy);
+          const onCenter = dist <= CENTER_NORM_RADIUS;
+          setIsOnCenter(onCenter);
+
+          if (onCenter) {
+            if (centerReadySinceMsRef.current === null) {
+              centerReadySinceMsRef.current = nowMs;
+            }
+            const elapsed = nowMs - centerReadySinceMsRef.current;
+            const progress = Math.max(0, Math.min(1, elapsed / CENTER_LOCK_MS));
+            setCenterLockProgress(progress);
+            if (progress >= 1) {
+              setCenterLocked(true);
+              setPhase("ready");
+              setStatusMessage("Center lock complete. Calibration is ready.");
+            } else {
+              setPhase("booting");
+              const secondsLeft = Math.max(1, Math.ceil((CENTER_LOCK_MS - elapsed) / 1000));
+              setStatusMessage(`Hold your gaze on center (${secondsLeft}s)`);
+            }
+          } else {
+            centerReadySinceMsRef.current = null;
+            setCenterLockProgress(prev => Math.max(0, prev - CENTER_PROGRESS_DECAY));
+            setPhase("booting");
+            setStatusMessage("Move gaze to the center target.");
+          }
           return;
         }
+        centerReadySinceMsRef.current = null;
+        setIsOnCenter(false);
+        setCenterLockProgress(0);
+        setPhase("booting");
         setStatusMessage(describeCameraStatus(payload.camera_status));
       } catch (error) {
         if (!active) {
           return;
         }
-        setPhase("error");
-        setStatusMessage(
-          "Camera status unavailable. Verify eyegaze service is running and camera permission is granted."
-        );
+        statusErrorStreakRef.current += 1;
+        setIsOnCenter(false);
+        centerReadySinceMsRef.current = null;
+        setCenterLockProgress(prev => Math.max(0, prev - CENTER_PROGRESS_DECAY));
+        setPhase("booting");
+        setStatusMessage("Reconnecting to camera service...");
         console.error("[CV Calibration] status poll failed:", error);
       }
     };
@@ -177,10 +339,38 @@ export function CVCursorCalibrationCenter() {
       active = false;
       window.clearInterval(timer);
     };
-  }, [isCalibrating, refreshStream]);
+  }, [isCalibrating, backendReachable, centerLocked, refreshStream]);
 
   React.useEffect(() => {
-    if (!isCalibrating) {
+    if (!isCalibrating || !backendReachable) {
+      return undefined;
+    }
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.repeat) {
+        return;
+      }
+      if (event.key.toLowerCase() !== "c") {
+        return;
+      }
+      event.preventDefault();
+      void (async () => {
+        try {
+          await callCvApi("/calibrate/center", { method: "POST" });
+          setStatusMessage("Manual center calibration requested (C). Hold gaze at center.");
+        } catch (error) {
+          console.error("[CV Calibration] center calibration request failed:", error);
+          setStatusMessage("Center calibration request failed. Check camera service.");
+        }
+      })();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [isCalibrating, backendReachable]);
+
+  React.useEffect(() => {
+    if (!isCalibrating || !backendReachable) {
       return undefined;
     }
     const timer = window.setInterval(() => {
@@ -191,21 +381,21 @@ export function CVCursorCalibrationCenter() {
       refreshStream("Waiting for camera frames. Reconnecting stream...");
     }, 1800);
     return () => window.clearInterval(timer);
-  }, [isCalibrating, lastFrameLoadMs, refreshStream]);
+  }, [isCalibrating, backendReachable, lastFrameLoadMs, refreshStream]);
 
-  const showOverlay = isCalibrating && phase !== "ready";
+  const showOverlay = isCalibrating && (phase !== "ready" || !backendReachable);
 
   return (
     <div style={styles.container}>
       <div style={styles.headerBlock}>
         <p style={styles.subtitle}>
-          Keep your face centered. Calibration starts only after a stable camera frame is available.
+          Keep your face centered. Press C anytime during this step to request center calibration.
         </p>
       </div>
 
       <div style={styles.previewCard}>
         <div style={styles.previewInner}>
-          {isCalibrating ? (
+          {isCalibrating && backendReachable ? (
             <>
               <img
                 src={`${CV_API_BASE}/video?nonce=${streamNonce}&attempt=${streamAttempt}`}
@@ -231,13 +421,28 @@ export function CVCursorCalibrationCenter() {
           ) : (
             <>
               <div style={styles.previewPlaceholder} />
-              <div style={styles.placeholderText}>Camera preview appears after Start.</div>
+              <div style={styles.placeholderText}>
+                {isCalibrating ? "Launching camera backend..." : "Camera preview appears after Start."}
+              </div>
             </>
           )}
 
           <div style={styles.target}>
+            <div
+              style={{
+                ...styles.targetProgress,
+                background: `conic-gradient(rgba(0,194,170,0.95) ${Math.round(
+                  centerLockProgress * 360
+                )}deg, rgba(255,255,255,0.14) 0deg)`,
+              }}
+            />
             <div style={styles.targetRing} />
-            <div style={styles.targetDot} />
+            <div
+              style={{
+                ...styles.targetDot,
+                background: isOnCenter || centerLocked ? "#00c2aa" : "#FF2D8D",
+              }}
+            />
             <div style={styles.crosshairV} />
             <div style={styles.crosshairH} />
           </div>
@@ -261,7 +466,13 @@ export function CVCursorCalibrationCenter() {
               animate={{ scale: [1, 1.25, 1], opacity: [1, 0.6, 1] }}
               transition={{ duration: 1.2, repeat: Infinity }}
             />
-            {phase === "ready" ? "Calibrating" : "Initializing"}
+            {!backendReachable
+              ? "Starting"
+              : centerLocked || phase === "ready"
+                ? "Center Locked"
+                : isOnCenter
+                  ? "Hold Center"
+                  : "Find Center"}
           </button>
         )}
       </div>
@@ -363,6 +574,15 @@ const styles: Record<string, React.CSSProperties> = {
     placeItems: "center",
     zIndex: 3,
     pointerEvents: "none",
+  },
+  targetProgress: {
+    position: "absolute",
+    width: 78,
+    height: 78,
+    borderRadius: "50%",
+    maskImage: "radial-gradient(circle, transparent 59%, black 61%)",
+    WebkitMaskImage: "radial-gradient(circle, transparent 59%, black 61%)",
+    transition: "background 120ms linear",
   },
   targetRing: {
     position: "absolute",
