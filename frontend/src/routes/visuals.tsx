@@ -304,7 +304,7 @@ export default function Visualizations() {
             rightSlot={<Pill label="8–16 Hz α" />}
           />
           <div style={styles.panelBody}>
-						<img src="http://localhost:5000/topo"/>
+						<img src="http://127.0.0.1:8770/topo"/>
           </div>
         </motion.div>
 
@@ -316,7 +316,7 @@ export default function Visualizations() {
             rightSlot={<Pill label="Raw / Filtered" />}
           />
           <div style={styles.panelBody}>
-						<img src="http://localhost:5000/waves"/>
+						<img src="http://127.0.0.1:8770/waves"/>
           </div>
         </motion.div>
       </motion.section>

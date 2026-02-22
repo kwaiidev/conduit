@@ -14,6 +14,9 @@ import { enableASL, disableASL, getASLReady } from "../lib/aslcv";
 import { enableVoice, disableVoice, getVoiceReady } from "../lib/voicetts";
 
 export default function OverlayBar() {
+  const isMacOS =
+    typeof navigator !== "undefined" &&
+    /Mac|iPhone|iPad|iPod/.test(navigator.platform);
   const [signalStrength] = useState(98);
   const [leftJawSignal, setLeftJawSignal] = useState(false);
   const [middleJawSignal, setMiddleJawSignal] = useState(false);
@@ -81,14 +84,14 @@ export default function OverlayBar() {
 
   const exitOverlay = async () => {
     try {
-      await window.electron?.toggleOverlay();
+      await window.electron?.toggleOverlay({ targetPath: "/home" });
     } catch (e) {
       console.error("Toggle overlay:", e);
     }
   };
 
   return (
-    <div style={styles.overlay}>
+    <div style={{ ...styles.overlay, ...(isMacOS ? styles.overlayMac : {}) }}>
       {/* Logo / Signal */}
       <div style={styles.signalSection}>
         <div style={styles.signalIcons}>
@@ -249,6 +252,10 @@ const styles: Record<string, React.CSSProperties> = {
     boxShadow: "0 4px 24px rgba(0,0,0,0.08)",
     border: "1px solid rgba(0,0,0,0.06)",
     margin: 8,
+  },
+  overlayMac: {
+    padding: "6px 20px",
+    transform: "translateY(-12%)",
   },
   signalSection: {
     display: "flex",

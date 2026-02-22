@@ -9,6 +9,9 @@ import { JawClenchTrainingRight } from "./onboarding/jawright";
 import { JawClenchTrainingLeft } from "./onboarding/jawleft";
 import { JawClenchTrainingSlack } from "./onboarding/jawslack";
 import { CVCursorCalibrationCenter } from "./onboarding/cvcalibrate";
+import { EEGConnectStep } from "./onboarding/eegconnect";
+import { ServiceStartupStep } from "./onboarding/serviceStartup";
+import { ASLVisualsCheckStep } from "./onboarding/aslVisualsCheck";
 
 export default function Onboarding() {
   const nav = useNavigate();
@@ -143,28 +146,38 @@ const steps = [
   },
   {
     title: "Connect Your EEG Device",
-    description: "Make sure your EEG headset is connected and powered on.",
-    content: <div className="placeholder-content">📡 Device connection UI goes here</div>,
+    description: "Launch the EEG service terminal and verify your headset stream is available.",
+    content: <EEGConnectStep />,
+  },
+  {
+    title: "Start Voice Service",
+    description: "Launch the voice backend terminal so voice input is available in Home/Overlay.",
+    content: <ServiceStartupStep service="voice" />,
+  },
+  {
+    title: "Start ASL + Validate Visuals",
+    description: "Start ASL backend, enable ASL detection/session, and verify ASL + eye-gaze CV are both online.",
+    content: <ASLVisualsCheckStep />,
   },
   {
     title: "Calibrate Baseline",
-    description: "Relax and clear your mind while we establish your baseline brainwave patterns.",
+    description: "Press Start to launch EEG training and hold a neutral jaw baseline.",
     content: <JawClenchTrainingSlack />,
   },
   {
     title: "Train Left Jaw Clench",
-    description: "Click or hover over 'Start' for 3 seconds to begin training.",
+    description: "Press Start to keep EEG active, then hold left jaw clench for 3 seconds.",
     content: <JawClenchTrainingLeft />,
   },
   {
     title: "Train Right Jaw Clench",
-    description: "Click or hover over 'Start' for 3 seconds to begin training.",
+    description: "Press Start to keep EEG active, then hold right jaw clench for 3 seconds.",
     content: <JawClenchTrainingRight />,
 
   },
   {
     title: "Train Middle Jaw Clench",
-    description: "Click or hover over 'Start' for 3 seconds to begin training.",
+    description: "Press Start to keep EEG active, then hold middle jaw clench for 3 seconds.",
     content: <JawClenchTrainingMiddle />,
 
   },

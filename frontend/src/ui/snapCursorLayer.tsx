@@ -19,10 +19,13 @@ type SystemSnapTargetPayload = {
   id: string;
   kind: string;
   label: string;
+  app?: string;
+  appPid?: number;
   left: number;
   top: number;
   width: number;
   height: number;
+  supportsPress?: boolean;
 };
 
 type SystemSnapTargetsResponse = {
@@ -358,11 +361,17 @@ export default function SnapCursorLayer() {
 
   const publishTargets = React.useCallback(() => {
     const domTargets = domTargetsRef.current;
-    const systemTargets = domTargets.length > 0 ? [] : systemTargetsRef.current;
+    const systemTargets = systemTargetsRef.current;
     const clustered = buildClusters([...domTargets, ...systemTargets]);
     targetsRef.current = clustered;
     setTargets(clustered);
-    setProviderLabel(systemTargets.length > 0 ? "DOM + SYSTEM" : "DOM");
+    if (domTargets.length > 0 && systemTargets.length > 0) {
+      setProviderLabel("DOM + SYSTEM");
+    } else if (systemTargets.length > 0) {
+      setProviderLabel("SYSTEM");
+    } else {
+      setProviderLabel("DOM");
+    }
   }, []);
 
   const ensureIdForElement = React.useCallback((el: HTMLElement): string => {
@@ -439,13 +448,6 @@ export default function SnapCursorLayer() {
 
     let active = true;
     const refreshSystemTargets = async () => {
-      if (domTargetsRef.current.length > 0) {
-        if (systemTargetsRef.current.length > 0) {
-          systemTargetsRef.current = [];
-          publishTargets();
-        }
-        return;
-      }
       try {
         const response = (await window.electron.listSystemSnapTargets()) as SystemSnapTargetsResponse;
         if (!active || !response || !Array.isArray(response.targets)) {
@@ -480,9 +482,11 @@ export default function SnapCursorLayer() {
           const cleanKind = typeof target.kind === "string" && target.kind.trim()
             ? target.kind.trim()
             : "control";
-          const cleanLabel = typeof target.label === "string" && target.label.trim()
+          const cleanLabelRaw = typeof target.label === "string" && target.label.trim()
             ? target.label.trim()
             : cleanKind;
+          const appName = typeof target.app === "string" && target.app.trim() ? target.app.trim() : "";
+          const cleanLabel = appName ? `${cleanLabelRaw} · ${appName}` : cleanLabelRaw;
           mapped.push({
             id: `system-${target.id}`,
             element: null,
@@ -735,12 +739,16 @@ export default function SnapCursorLayer() {
         }
         if (target.source === "system") {
           event.preventDefault();
-          if (typeof window.electron?.moveCursorToScreenPoint === "function") {
+          if (typeof window.electron?.commitSystemSnapTarget === "function") {
+            const x = target.cx + Number(window.screenX || 0);
+            const y = target.cy + Number(window.screenY || 0);
+            void window.electron.commitSystemSnapTarget({ x, y });
+          } else if (typeof window.electron?.commitNearestSnapTarget === "function") {
+            void window.electron.commitNearestSnapTarget();
+          } else if (typeof window.electron?.moveCursorToScreenPoint === "function") {
             const x = target.cx + Number(window.screenX || 0);
             const y = target.cy + Number(window.screenY || 0);
             void window.electron.moveCursorToScreenPoint({ x, y });
-          } else if (typeof window.electron?.commitNearestSnapTarget === "function") {
-            void window.electron.commitNearestSnapTarget();
           }
           lastHotkeyAtRef.current = now;
           return;

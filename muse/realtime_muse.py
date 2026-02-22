@@ -24,9 +24,15 @@ from flask import Flask, Response, render_template_string
 # ================================
 # Config
 # ================================
+def env_int(name: str, fallback: int) -> int:
+    try:
+        return int(os.environ.get(name, str(fallback)))
+    except (TypeError, ValueError):
+        return fallback
+
 SAMPLES_PER_WINDOW    = 256
 WINDOW_STRIDE         = 64
-STREAM_PORT           = 5000
+STREAM_PORT           = env_int("EEG_STREAM_PORT", 8770)
 TARGET_FPS            = 20       # target FPS for the MJPEG streams
 FRAME_INTERVAL        = 1.0 / TARGET_FPS
 
@@ -669,6 +675,22 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 def index():
     return DASHBOARD_HTML
 
+@app.route('/health')
+def health():
+    return (
+        json.dumps({
+            'service': 'muse-eeg-realtime',
+            'port': STREAM_PORT,
+            'endpoints': ['/topo', '/waves', '/combo', '/changestate', '/api/changestate']
+        }),
+        200,
+        {
+            'Content-Type': 'application/json',
+            'Cache-Control': 'no-cache',
+            'Access-Control-Allow-Origin': '*'
+        }
+    )
+
 @app.route('/topo')
 def topo_stream():
     return Response(
@@ -845,6 +867,7 @@ def main():
     ft = threading.Thread(target=start_flask, daemon=True, name="flask")
     ft.start()
     print(f"[FLASK] http://localhost:{STREAM_PORT}/")
+    print(f"        /health — service health")
     print(f"        /       — dashboard")
     print(f"        /combo  — combined MJPEG")
     print(f"        /topo   — topomap MJPEG")

@@ -18,7 +18,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 LABEL_MODE         = 3          # Set this before running: 0=idle, 1=left-click, 2=right-click, 3=other
 SAMPLES_PER_WINDOW = 256        # 1 full second at 256 Hz — better frequency resolution
 WINDOW_STRIDE      = 64         # Slide window by 64 samples (75% overlap) — more training data
-STREAM_PORT        = 5000
+STREAM_PORT        = int(os.environ.get("EEG_STREAM_PORT", "8770"))
 FRAME_INTERVAL     = 0.05
 MAX_WINDOWS        = 300        # How many windows to collect per label session
 

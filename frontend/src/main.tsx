@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import ReactDOM from 'react-dom/client';
-import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Navigate, useLocation, useNavigate } from 'react-router-dom';
 import { ThemeProvider } from './context/ThemeContext';
 import Shell from './ui/shell';
 import OverlayBar from './ui/overlay';
@@ -36,10 +36,40 @@ const SnapCursorRoot: React.FC = () => {
   return <SnapCursorLayer />;
 };
 
+const PendingRouteRedirect: React.FC = () => {
+  const navigate = useNavigate();
+
+  useEffect(() => {
+    let mounted = true;
+
+    if (typeof window.electron?.consumePendingRoute !== "function") {
+      return () => {
+        mounted = false;
+      };
+    }
+
+    window.electron.consumePendingRoute().then((targetPath) => {
+      if (!mounted) {
+        return;
+      }
+      if (typeof targetPath === "string" && targetPath.startsWith("/")) {
+        navigate(targetPath, { replace: true });
+      }
+    });
+
+    return () => {
+      mounted = false;
+    };
+  }, [navigate]);
+
+  return null;
+};
+
 const App: React.FC = () => {
   return (
     <ThemeProvider>
       <BrowserRouter>
+        <PendingRouteRedirect />
         <Routes>
           <Route path="/onboarding" element={<Onboarding />} />
           <Route
