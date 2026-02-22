@@ -1,5 +1,6 @@
 import React from "react";
 import { disableEEG, enableEEG } from "../../lib/eeg";
+import { setModalityPreference } from "../../state/modalityPreferences";
 
 export function EEGConnectStep() {
   const [isBooting, setIsBooting] = React.useState(false);
@@ -16,15 +17,18 @@ export function EEGConnectStep() {
       if (!launchResult.ok) {
         setIsReady(false);
         setStatusMessage(`Unable to launch EEG backend: ${launchResult.message}`);
+        setModalityPreference("eeg-select", false);
         return;
       }
       await enableEEG();
       setIsReady(true);
       setStatusMessage("EEG stream confirmed. Backend is active.");
+      setModalityPreference("eeg-select", true);
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       setIsReady(false);
       setStatusMessage(`EEG startup failed: ${detail}`);
+      setModalityPreference("eeg-select", false);
     } finally {
       setIsBooting(false);
     }
@@ -33,6 +37,7 @@ export function EEGConnectStep() {
   const pauseSession = React.useCallback(async () => {
     setIsReady(false);
     setStatusMessage("EEG session paused.");
+    setModalityPreference("eeg-select", false);
     try {
       await disableEEG();
     } catch {
@@ -50,6 +55,7 @@ export function EEGConnectStep() {
         }
         setIsReady(true);
         setStatusMessage("EEG stream already confirmed. Continue to baseline calibration.");
+        setModalityPreference("eeg-select", true);
       } catch {
         // no-op
       }

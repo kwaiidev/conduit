@@ -1,14 +1,8 @@
 import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
 import React from "react";
 import { enableASL, getASLReady } from "../../lib/aslcv";
+import { setModalityPreference } from "../../state/modalityPreferences";
 const ASL_VIDEO_URL = "http://localhost:8765/video";
-const SIGN_TEXT_PREFERENCE_KEY = "conduit-modality-intent-sign-text";
-function setModalityPreference(enabled) {
-    if (typeof window === "undefined" || !window.localStorage) {
-        return;
-    }
-    localStorage.setItem(SIGN_TEXT_PREFERENCE_KEY, enabled ? "1" : "0");
-}
 function describeHealth(health) {
     if (!health.signBackend) {
         return "Sign backend is offline. Start ASL service to test visuals.";
@@ -58,6 +52,7 @@ export function ASLVisualsCheckStep() {
             const launchResult = await window.electron.startSignBackend();
             if (!launchResult.ok) {
                 setStatusMessage(`Unable to launch sign backend: ${launchResult.message}`);
+                setModalityPreference("sign-text", false);
                 return;
             }
             setStatusMessage("Enabling ASL detection and session...");
@@ -71,7 +66,7 @@ export function ASLVisualsCheckStep() {
                 }
                 await sleep(400);
             }
-            setModalityPreference(ready);
+            setModalityPreference("sign-text", ready);
             const nextHealth = await probeStatus(true);
             if (ready && nextHealth.cvBackend) {
                 setStatusMessage("ASL and eye-gaze CV are both active. Open Visualizations to confirm live feed.");
@@ -88,7 +83,7 @@ export function ASLVisualsCheckStep() {
         catch (error) {
             const detail = error instanceof Error ? error.message : String(error);
             setStatusMessage(`ASL startup failed: ${detail}`);
-            setModalityPreference(false);
+            setModalityPreference("sign-text", false);
         }
         finally {
             setIsStartingAsl(false);
@@ -101,9 +96,11 @@ export function ASLVisualsCheckStep() {
             const launchResult = await window.electron.startCvBackend({ camera: 0 });
             if (!launchResult.ok) {
                 setStatusMessage(`Unable to launch eye-gaze CV backend: ${launchResult.message}`);
+                setModalityPreference("cv-pointer", false);
                 return;
             }
             const nextHealth = await probeStatus(true);
+            setModalityPreference("cv-pointer", nextHealth.cvBackend);
             if (nextHealth.cvBackend && nextHealth.aslReady) {
                 setStatusMessage("ASL and eye-gaze CV are both active. You can verify both in the UI now.");
             }
@@ -117,6 +114,7 @@ export function ASLVisualsCheckStep() {
         catch (error) {
             const detail = error instanceof Error ? error.message : String(error);
             setStatusMessage(`CV startup failed: ${detail}`);
+            setModalityPreference("cv-pointer", false);
         }
         finally {
             setIsStartingCv(false);

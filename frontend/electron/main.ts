@@ -35,6 +35,7 @@ const parsePort = (value: string | undefined, fallback: number): number => {
 const CAMERA_BROKER_STREAM_URL = process.env.CAMERA_BROKER_URL || "http://localhost:9001/stream";
 const CV_HTTP_PORT = parsePort(process.env.CV_HTTP_PORT, 8767);
 const CV_EVENT_PORT = parsePort(process.env.CV_EVENT_PORT, 8768);
+const VOICE_HTTP_PORT = parsePort(process.env.VOICE_HTTP_PORT, 8766);
 const EEG_HTTP_PORT = parsePort(process.env.EEG_HTTP_PORT, 8770);
 const EEG_HEALTH_PATH = "/health";
 const EEG_SERVICE_ID = "muse-eeg-realtime";
@@ -767,6 +768,45 @@ end run
   return parseSystemTargetActionResult(result.stdout);
 }
 
+function isPointInsideSystemTarget(target: SystemSnapTarget, x: number, y: number): boolean {
+  return (
+    x >= target.left
+    && x <= target.left + target.width
+    && y >= target.top
+    && y <= target.top + target.height
+  );
+}
+
+function distanceToSystemTargetBounds(target: SystemSnapTarget, x: number, y: number): number {
+  const right = target.left + target.width;
+  const bottom = target.top + target.height;
+  const dx = x < target.left ? target.left - x : (x > right ? x - right : 0);
+  const dy = y < target.top ? target.top - y : (y > bottom ? y - bottom : 0);
+  return Math.hypot(dx, dy);
+}
+
+function clampPointToSystemTarget(
+  target: SystemSnapTarget,
+  x: number,
+  y: number,
+  inset = 3
+): { x: number; y: number } {
+  const minX = target.left + inset;
+  const minY = target.top + inset;
+  const maxX = target.left + target.width - inset;
+  const maxY = target.top + target.height - inset;
+  if (maxX <= minX || maxY <= minY) {
+    return {
+      x: target.left + target.width * 0.5,
+      y: target.top + target.height * 0.5,
+    };
+  }
+  return {
+    x: Math.min(maxX, Math.max(minX, x)),
+    y: Math.min(maxY, Math.max(minY, y)),
+  };
+}
+
 async function commitSystemTargetAtPoint(targetX: number, targetY: number): Promise<SnapCommitResponse> {
   const response = await listSystemSnapTargets();
   if (!response.ok) {
@@ -792,11 +832,21 @@ async function commitSystemTargetAtPoint(targetX: number, targetY: number): Prom
     .map(target => {
       const cx = target.left + target.width * 0.5;
       const cy = target.top + target.height * 0.5;
-      const d = Math.hypot(cx - targetX, cy - targetY);
-      let score = d;
+      const edgeDistance = distanceToSystemTargetBounds(target, targetX, targetY);
+      const centerDistance = Math.hypot(cx - targetX, cy - targetY);
+      const inside = isPointInsideSystemTarget(target, targetX, targetY);
+      const diagonal = Math.hypot(target.width, target.height);
+      let score = edgeDistance * 0.9 + centerDistance * 0.1;
+      if (inside) {
+        score *= 0.22;
+      }
+      score -= Math.min(16, diagonal * 0.032);
+      if (target.supportsPress) {
+        score -= 7.5;
+      }
       if (target.id === lastSnappedTargetId) {
         const cooldownLeft = Math.max(0, SNAP_TARGET_COOLDOWN_MS - (now - lastSnappedTargetAt));
-        score += cooldownLeft > 0 ? 120 : 18;
+        score += cooldownLeft > 0 ? 140 : 24;
       }
       return { target, cx, cy, score };
     })
@@ -812,7 +862,8 @@ async function commitSystemTargetAtPoint(targetX: number, targetY: number): Prom
     };
   }
 
-  const axResult = await activateSystemTargetAtScreenPoint(best.cx, best.cy);
+  const activationPoint = clampPointToSystemTarget(best.target, targetX, targetY);
+  const axResult = await activateSystemTargetAtScreenPoint(activationPoint.x, activationPoint.y);
   if (axResult.ok) {
     lastSnappedTargetId = best.target.id;
     lastSnappedTargetAt = now;
@@ -823,15 +874,15 @@ async function commitSystemTargetAtPoint(targetX: number, targetY: number): Prom
       message: `Activated ${best.target.label} via ${axResult.method}.`,
       target: {
         id: best.target.id,
-        x: best.cx,
-        y: best.cy,
+        x: activationPoint.x,
+        y: activationPoint.y,
         label: best.target.label,
         app: best.target.app,
       },
     };
   }
 
-  const fallbackClicked = await clickCursorAtScreenPoint(best.cx, best.cy);
+  const fallbackClicked = await clickCursorAtScreenPoint(activationPoint.x, activationPoint.y);
   if (fallbackClicked) {
     lastSnappedTargetId = best.target.id;
     lastSnappedTargetAt = now;
@@ -843,8 +894,8 @@ async function commitSystemTargetAtPoint(targetX: number, targetY: number): Prom
       message: `Activated ${best.target.label} via cursor fallback.`,
       target: {
         id: best.target.id,
-        x: best.cx,
-        y: best.cy,
+        x: activationPoint.x,
+        y: activationPoint.y,
         label: best.target.label,
         app: best.target.app,
       },
@@ -858,8 +909,8 @@ async function commitSystemTargetAtPoint(targetX: number, targetY: number): Prom
     message: "Failed to activate target via accessibility API and cursor fallback.",
     target: {
       id: best.target.id,
-      x: best.cx,
-      y: best.cy,
+      x: activationPoint.x,
+      y: activationPoint.y,
       label: best.target.label,
       app: best.target.app,
     },
@@ -994,6 +1045,31 @@ async function waitForBackendTcp(
     await sleep(250);
   }
   return false;
+}
+
+type VoiceBackendProbeState = "free" | "ready" | "occupied";
+
+async function probeVoiceBackendState(timeoutMs = 900): Promise<VoiceBackendProbeState> {
+  const tcpReady = await probeTcp("127.0.0.1", VOICE_HTTP_PORT, timeoutMs);
+  if (!tcpReady) {
+    return "free";
+  }
+
+  const statusProbe = await probeHttp("127.0.0.1", VOICE_HTTP_PORT, "/status", timeoutMs);
+  if (!statusProbe.ok || statusProbe.statusCode !== 200) {
+    return "occupied";
+  }
+
+  try {
+    const parsed = JSON.parse(statusProbe.body) as Record<string, unknown>;
+    const looksLikeVoiceStatus =
+      Object.prototype.hasOwnProperty.call(parsed, "active")
+      || Object.prototype.hasOwnProperty.call(parsed, "is_recording")
+      || Object.prototype.hasOwnProperty.call(parsed, "processing");
+    return looksLikeVoiceStatus ? "ready" : "occupied";
+  } catch {
+    return "occupied";
+  }
 }
 
 async function waitForEegBackendReady(
@@ -1344,25 +1420,25 @@ function launchCvBackendInBackground(cameraIndex: number): { ok: boolean; messag
     "--face-landmarker-task",
     taskPath,
     "--cursor-ramp-deadzone-px",
-    "0",
+    "10",
     "--cursor-ramp-full-speed-px",
-    "24",
+    "220",
     "--cursor-ramp-min-scale",
-    "0.95",
+    "0.14",
     "--cursor-ramp-min-step-px",
     "0",
     "--cursor-gain",
-    "9.5",
+    "3.0",
     "--cursor-bottom-gain-mult",
-    "9",
+    "2.4",
     "--cursor-max-speed-px-s",
-    "3600",
+    "420",
     "--one-euro-cutoff",
-    "0.2",
+    "0.1",
     "--one-euro-beta",
-    "0.02",
+    "0.006",
     "--one-euro-d-cutoff",
-    "2.2",
+    "1.0",
   ];
 
   try {
@@ -1510,19 +1586,44 @@ function launchVoiceBackendInBackground(): { ok: boolean; message: string } {
 }
 
 async function startVoiceBackendAndWait(): Promise<{ ok: boolean; message: string }> {
+  const preflight = await probeVoiceBackendState(600);
+  if (preflight === "ready") {
+    return { ok: true, message: `Voice backend already reachable on 127.0.0.1:${VOICE_HTTP_PORT}.` };
+  }
+  if (preflight === "occupied") {
+    return {
+      ok: false,
+      message: `Cannot start voice backend: port ${VOICE_HTTP_PORT} is already in use by another service.`,
+    };
+  }
+
   const launch = launchVoiceBackendInBackground();
   if (!launch.ok) {
     return launch;
   }
 
-  const ready = await waitForBackendTcp("127.0.0.1", 8766, 45000, voiceBackendPid);
+  const ready = await waitForBackendTcp("127.0.0.1", VOICE_HTTP_PORT, 45000, voiceBackendPid);
   if (!ready) {
     stopVoiceBackend({ force: true, reason: "startup-timeout" });
     return {
       ok: false,
-      message: `Voice backend did not become reachable on 127.0.0.1:8766 within 45s. ${launch.message}`.trim(),
+      message: `Voice backend did not become reachable on 127.0.0.1:${VOICE_HTTP_PORT} within 45s. ${launch.message}`.trim(),
     };
   }
+
+  const postLaunchState = await probeVoiceBackendState(900);
+  if (postLaunchState !== "ready") {
+    stopVoiceBackend({ force: true, reason: "startup-validation-failed" });
+    const extra =
+      postLaunchState === "occupied"
+        ? `Port ${VOICE_HTTP_PORT} is responding with a non-voice service.`
+        : "Voice backend listener disappeared before readiness validation completed.";
+    return {
+      ok: false,
+      message: `Voice backend failed readiness validation on 127.0.0.1:${VOICE_HTTP_PORT}. ${extra}`,
+    };
+  }
+
   return launch;
 }
 
@@ -2132,7 +2233,7 @@ ipcMain.handle("voice:stop-backend", () => {
 
 ipcMain.handle("voice:is-backend-running", async () => {
   try {
-    return await probeTcp("127.0.0.1", 8766, 350);
+    return (await probeVoiceBackendState(350)) === "ready";
   } catch {
     return false;
   }

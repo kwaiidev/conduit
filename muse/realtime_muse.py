@@ -114,8 +114,8 @@ WAVE_HISTORY   = 60
 wave_history   = {name: deque(maxlen=WAVE_HISTORY) for name in BAND_COLORS}
 wave_hist_lock = threading.Lock()
 
-# Latest prediction state (for HUD overlay)
-pred_state = {"label": "—", "conf": 0.0, "ts": 0.0}
+# Latest prediction state (for HUD overlay + external UI consumers)
+pred_state = {"id": -1, "label": "—", "conf": 0.0, "ts": 0.0}
 pred_lock  = threading.Lock()
 
 # ================================
@@ -687,7 +687,33 @@ def health():
             'port': STREAM_PORT,
             'stream_connected': eeg_stream_connected,
             'state': state,
-            'endpoints': ['/topo', '/waves', '/combo', '/changestate', '/api/changestate']
+            'endpoints': ['/topo', '/waves', '/combo', '/prediction', '/changestate', '/api/changestate']
+        }),
+        200,
+        {
+            'Content-Type': 'application/json',
+            'Cache-Control': 'no-cache',
+            'Access-Control-Allow-Origin': '*'
+        }
+    )
+
+@app.route('/prediction')
+def prediction_state():
+    with pred_lock:
+        prediction_id = int(pred_state.get("id", -1))
+        label = str(pred_state.get("label", "—"))
+        confidence = float(pred_state.get("conf", 0.0))
+        ts = float(pred_state.get("ts", 0.0))
+
+    age_ms = int(max(0.0, (time.monotonic() - ts) * 1000.0)) if ts > 0 else 10_000_000
+    return (
+        json.dumps({
+            'prediction': prediction_id,
+            'label': label,
+            'confidence': confidence,
+            'age_ms': age_ms,
+            'stream_connected': eeg_stream_connected,
+            'state': state,
         }),
         200,
         {
@@ -992,6 +1018,7 @@ def main():
 
         # -- Update HUD state --
         with pred_lock:
+            pred_state["id"] = majority_prediction
             pred_state["label"] = PRED_LABELS.get(majority_prediction, str(majority_prediction))
             pred_state["conf"]  = avg_conf
             pred_state["ts"]    = time.monotonic()

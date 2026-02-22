@@ -4,6 +4,7 @@ import { motion } from "motion/react";
 import { Sun, Moon } from "lucide-react";
 import { useTheme } from "../context/ThemeContext";
 import { setCompletedOnboarding } from "../state/onboarding";
+import { resetAllModalityPreferences } from "../state/modalityPreferences";
 import { JawClenchTrainingRight } from "./onboarding/jawright";
 import { JawClenchTrainingLeft } from "./onboarding/jawleft";
 import { JawClenchTrainingSlack } from "./onboarding/jawslack";
@@ -97,6 +98,13 @@ export default function Onboarding() {
     currentStep.content
   );
   const stepContentClassName = `step-content${isFinalStep ? " step-content-final" : ""}`;
+
+  useEffect(() => {
+    if (startStep === 0) {
+      // Fresh onboarding should start from a clean modality-selection state.
+      resetAllModalityPreferences(false);
+    }
+  }, [startStep]);
 
   useEffect(() => {
     return () => {

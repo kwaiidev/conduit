@@ -1,8 +1,13 @@
 import { jsxs as _jsxs, jsx as _jsx } from "react/jsx-runtime";
 import React from "react";
+import { setModalityPreference } from "../../state/modalityPreferences";
 const SERVICE_LABEL = {
     voice: "Voice",
     sign: "Sign",
+};
+const SERVICE_FEATURE = {
+    voice: "voice-text",
+    sign: "sign-text",
 };
 export function ServiceStartupStep({ service }) {
     const [isStarting, setIsStarting] = React.useState(false);
@@ -24,15 +29,18 @@ export function ServiceStartupStep({ service }) {
             if (!launchResult.ok) {
                 setStatusMessage(`Unable to launch ${SERVICE_LABEL[service]} backend: ${launchResult.message}`);
                 setIsReady(false);
+                setModalityPreference(SERVICE_FEATURE[service], false);
                 return;
             }
             setIsReady(true);
             setStatusMessage(`${SERVICE_LABEL[service]} backend running.`);
+            setModalityPreference(SERVICE_FEATURE[service], true);
         }
         catch (error) {
             const detail = error instanceof Error ? error.message : String(error);
             setIsReady(false);
             setStatusMessage(`${SERVICE_LABEL[service]} startup failed: ${detail}`);
+            setModalityPreference(SERVICE_FEATURE[service], false);
         }
         finally {
             setIsStarting(false);
@@ -48,6 +56,7 @@ export function ServiceStartupStep({ service }) {
                 }
                 setIsReady(true);
                 setStatusMessage(`${SERVICE_LABEL[service]} backend already running.`);
+                setModalityPreference(SERVICE_FEATURE[service], true);
             }
             catch {
                 // no-op

@@ -1,5 +1,6 @@
 import React from "react";
 import { motion } from "motion/react";
+import { setModalityPreference } from "../../state/modalityPreferences";
 
 const CV_API_BASE = "http://127.0.0.1:8767";
 const STATUS_POLL_MS = 500;
@@ -185,6 +186,7 @@ export function CVCursorCalibrationCenter({
         processing: true,
         mouse_control: false,
       });
+      setModalityPreference("cv-pointer", true);
       setStatusMessage("Camera online. Look at the center target to calibrate.");
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
@@ -192,6 +194,7 @@ export function CVCursorCalibrationCenter({
       setIsOnCenter(false);
       setCenterLocked(false);
       setPhase("error");
+      setModalityPreference("cv-pointer", false);
       setStatusMessage(
         `Cannot start eye-gaze service. ${detail}`.trim()
       );
@@ -213,6 +216,7 @@ export function CVCursorCalibrationCenter({
     centerReadySinceMsRef.current = null;
     centerLockNotifiedRef.current = false;
     statusErrorStreakRef.current = 0;
+    setModalityPreference("cv-pointer", false);
     try {
       await setCvState({
         processing: false,

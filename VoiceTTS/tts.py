@@ -65,6 +65,8 @@ ELEVENLABS_API_KEY = os.environ.get("ELEVENLABS_API_KEY", "")
 GOOGLE_API_KEY     = os.environ.get("GOOGLE_API_KEY", "")
 GEMINI_MODEL       = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 LATENCY_TIMEOUT    = float(os.environ.get("VOICE_LATENCY_TIMEOUT", "15.0"))
+STT_MODEL_ID       = "scribe_v1"
+STT_LANGUAGE_CODE  = "eng"
 
 SAMPLE_RATE        = 16_000
 CHANNELS           = 1
@@ -488,7 +490,10 @@ class VoiceAgent:
                 "https://api.elevenlabs.io/v1/speech-to-text",
                 headers={"xi-api-key": ELEVENLABS_API_KEY.strip()},
                 files={"file": ("audio.wav", wav_bytes, "audio/wav")},
-                data={"model_id": "scribe_v1"},
+                data={
+                    "model_id": STT_MODEL_ID,
+                    "language_code": STT_LANGUAGE_CODE,
+                },
             )
             if not resp.is_success:
                 print(f"[{self._ts()}] ElevenLabs error {resp.status_code}: {resp.text}")

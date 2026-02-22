@@ -1,10 +1,16 @@
 import React from "react";
+import { ModalityFeatureId, setModalityPreference } from "../../state/modalityPreferences";
 
 type ServiceKind = "voice" | "sign";
 
 const SERVICE_LABEL: Record<ServiceKind, string> = {
   voice: "Voice",
   sign: "Sign",
+};
+
+const SERVICE_FEATURE: Record<ServiceKind, ModalityFeatureId> = {
+  voice: "voice-text",
+  sign: "sign-text",
 };
 
 export function ServiceStartupStep({ service }: { service: ServiceKind }) {
@@ -31,14 +37,17 @@ export function ServiceStartupStep({ service }: { service: ServiceKind }) {
       if (!launchResult.ok) {
         setStatusMessage(`Unable to launch ${SERVICE_LABEL[service]} backend: ${launchResult.message}`);
         setIsReady(false);
+        setModalityPreference(SERVICE_FEATURE[service], false);
         return;
       }
       setIsReady(true);
       setStatusMessage(`${SERVICE_LABEL[service]} backend running.`);
+      setModalityPreference(SERVICE_FEATURE[service], true);
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       setIsReady(false);
       setStatusMessage(`${SERVICE_LABEL[service]} startup failed: ${detail}`);
+      setModalityPreference(SERVICE_FEATURE[service], false);
     } finally {
       setIsStarting(false);
     }
@@ -54,6 +63,7 @@ export function ServiceStartupStep({ service }: { service: ServiceKind }) {
         }
         setIsReady(true);
         setStatusMessage(`${SERVICE_LABEL[service]} backend already running.`);
+        setModalityPreference(SERVICE_FEATURE[service], true);
       } catch {
         // no-op
       }

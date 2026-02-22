@@ -3,39 +3,15 @@ import React, { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { enableASL, disableASL, getASLReady } from "../lib/aslcv";
 import { enableVoice, disableVoice, getVoiceReady } from "../lib/voicetts";
-import { enableEEG, disableEEG } from "../lib/eeg";
+import { enableEEG, disableEEG, getEEGReady } from "../lib/eeg";
 import { enableCvCursorControl, disableCvCursorControl, getCvReady } from "../lib/cv";
 import { CVCursorCalibrationCenter } from "./onboarding/cvcalibrate";
 import { motion } from "motion/react";
+import { getModalityPreference, getPreferredActiveModes, setModalityPreference, } from "../state/modalityPreferences";
 import { MousePointer2, Zap, Type, Activity, Eye, Mic, ArrowRight } from "lucide-react";
-const CV_POINTER_PREFERENCE_KEY = "conduit-modality-intent-cv-pointer";
-const SIGN_TEXT_PREFERENCE_KEY = "conduit-modality-intent-sign-text";
-function getModalityPreference(key) {
-    if (typeof window === "undefined" || !window.localStorage) {
-        return null;
-    }
-    const value = localStorage.getItem(key);
-    if (value === null) {
-        return null;
-    }
-    return value === "1";
-}
-function setModalityPreference(key, enabled) {
-    if (typeof window === "undefined" || !window.localStorage) {
-        return;
-    }
-    localStorage.setItem(key, enabled ? "1" : "0");
-}
 function shouldActivateByIntent(featureId, backendReady) {
-    if (featureId === "cv-pointer") {
-        const preference = getModalityPreference(CV_POINTER_PREFERENCE_KEY);
-        return preference === null ? false : preference && backendReady;
-    }
-    if (featureId === "sign-text") {
-        const preference = getModalityPreference(SIGN_TEXT_PREFERENCE_KEY);
-        return preference === null ? false : preference && backendReady;
-    }
-    return backendReady;
+    const preference = getModalityPreference(featureId);
+    return preference === null ? backendReady : preference;
 }
 const containerVariants = {
     hidden: { opacity: 0 },
@@ -54,18 +30,100 @@ const itemVariants = {
 };
 export default function Home() {
     const nav = useNavigate();
-    const [activeModes, setActiveModes] = useState([]);
+    const [activeModes, setActiveModes] = useState(() => getPreferredActiveModes());
     const [showCvCenterCalibration, setShowCvCenterCalibration] = useState(false);
-    // Sync voice and sign toggles with real API state on mount
+    // On first load, apply onboarding intent to runtime services, then sync from actual readiness.
     useEffect(() => {
+        let cancelled = false;
         const sync = (id, ready) => {
             setActiveModes((prev) => shouldActivateByIntent(id, ready)
                 ? prev.includes(id) ? prev : [...prev, id]
                 : prev.filter((m) => m !== id));
         };
-        getCvReady().then((ready) => sync('cv-pointer', ready));
-        getVoiceReady().then((ready) => sync('voice-text', ready));
-        getASLReady().then((ready) => sync('sign-text', ready));
+        const runtimes = [
+            {
+                id: "cv-pointer",
+                getReady: getCvReady,
+                enable: enableCvCursorControl,
+                disable: disableCvCursorControl,
+            },
+            {
+                id: "eeg-select",
+                getReady: getEEGReady,
+                enable: enableEEG,
+                disable: disableEEG,
+            },
+            {
+                id: "voice-text",
+                getReady: getVoiceReady,
+                enable: enableVoice,
+                disable: disableVoice,
+            },
+            {
+                id: "sign-text",
+                getReady: getASLReady,
+                enable: enableASL,
+                disable: disableASL,
+            },
+        ];
+        const sleep = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms));
+        const waitForReady = async (getReady, timeoutMs) => {
+            const deadline = Date.now() + timeoutMs;
+            while (Date.now() < deadline) {
+                if (await getReady()) {
+                    return true;
+                }
+                await sleep(250);
+            }
+            return getReady();
+        };
+        const syncRuntime = async (runtime) => {
+            const preference = getModalityPreference(runtime.id);
+            try {
+                if (preference === true) {
+                    let ready = await waitForReady(runtime.getReady, 400);
+                    if (!ready) {
+                        await runtime.enable();
+                        const warmupMs = runtime.id === "cv-pointer" ? 9000 : 4000;
+                        ready = await waitForReady(runtime.getReady, warmupMs);
+                    }
+                    if (!cancelled) {
+                        sync(runtime.id, ready);
+                    }
+                    if (!ready) {
+                        setModalityPreference(runtime.id, false);
+                    }
+                    return;
+                }
+                if (preference === false) {
+                    const ready = await runtime.getReady();
+                    if (ready) {
+                        await runtime.disable();
+                    }
+                    if (!cancelled) {
+                        sync(runtime.id, false);
+                    }
+                    return;
+                }
+                const ready = await runtime.getReady();
+                if (!cancelled) {
+                    sync(runtime.id, ready);
+                }
+            }
+            catch (error) {
+                console.error(`[${runtime.id}] startup sync failed:`, error);
+                if (preference === true) {
+                    setModalityPreference(runtime.id, false);
+                }
+                if (!cancelled) {
+                    sync(runtime.id, false);
+                }
+            }
+        };
+        void Promise.all(runtimes.map(syncRuntime));
+        return () => {
+            cancelled = true;
+        };
     }, []);
     useEffect(() => {
         if (showCvCenterCalibration) {
@@ -85,8 +143,8 @@ export default function Home() {
         }
         catch (error) {
             console.error("CV enable after closing calibration modal failed:", error);
-            setActiveModes((prev) => prev.filter((id) => id !== 'cv-pointer'));
-            setModalityPreference(CV_POINTER_PREFERENCE_KEY, false);
+            setActiveModes((prev) => prev.filter((id) => id !== "cv-pointer"));
+            setModalityPreference("cv-pointer", false);
             await disableCvCursorControl();
         }
     }, []);
@@ -99,8 +157,8 @@ export default function Home() {
             catch (error) {
                 console.error("CV re-enable after calibration failed:", error);
                 setShowCvCenterCalibration(false);
-                setActiveModes((prev) => prev.filter((id) => id !== 'cv-pointer'));
-                setModalityPreference(CV_POINTER_PREFERENCE_KEY, false);
+                setActiveModes((prev) => prev.filter((id) => id !== "cv-pointer"));
+                setModalityPreference("cv-pointer", false);
                 await disableCvCursorControl();
             }
         })();
@@ -169,13 +227,8 @@ export default function Home() {
         const next = !isCurrentlyActive;
         // Optimistically update UI
         setActiveModes((prev) => next ? [...prev, featureId] : prev.filter((id) => id !== featureId));
-        if (featureId === 'cv-pointer') {
-            setModalityPreference(CV_POINTER_PREFERENCE_KEY, next);
-        }
-        if (featureId === 'sign-text') {
-            setModalityPreference(SIGN_TEXT_PREFERENCE_KEY, next);
-        }
-        if (featureId === 'cv-pointer') {
+        setModalityPreference(featureId, next);
+        if (featureId === "cv-pointer") {
             if (next) {
                 setShowCvCenterCalibration(true);
             }
@@ -187,12 +240,12 @@ export default function Home() {
                 catch (error) {
                     console.error("CV disable failed:", error);
                     setActiveModes((prev) => isCurrentlyActive ? [...prev, featureId] : prev.filter((id) => id !== featureId));
-                    setModalityPreference(CV_POINTER_PREFERENCE_KEY, isCurrentlyActive);
+                    setModalityPreference(featureId, isCurrentlyActive);
                 }
             }
             return;
         }
-        if (featureId === 'eeg-select') {
+        if (featureId === "eeg-select") {
             try {
                 if (next) {
                     await enableEEG();
@@ -205,28 +258,24 @@ export default function Home() {
                 console.error("EEG toggle failed:", e);
                 // Revert on failure
                 setActiveModes((prev) => isCurrentlyActive ? [...prev, featureId] : prev.filter((id) => id !== featureId));
+                setModalityPreference(featureId, isCurrentlyActive);
             }
         }
-        if (featureId === 'sign-text' || featureId === 'voice-text') {
-            const enable = featureId === 'sign-text' ? enableASL : enableVoice;
-            const disable = featureId === 'sign-text' ? disableASL : disableVoice;
+        if (featureId === "sign-text" || featureId === "voice-text") {
+            const enable = featureId === "sign-text" ? enableASL : enableVoice;
+            const disable = featureId === "sign-text" ? disableASL : disableVoice;
             try {
                 if (next) {
                     await enable();
                 }
                 else {
                     await disable();
-                    if (featureId === 'sign-text') {
-                        setModalityPreference(SIGN_TEXT_PREFERENCE_KEY, false);
-                    }
                 }
             }
             catch (e) {
                 console.error(`${featureId} toggle failed:`, e);
                 setActiveModes((prev) => isCurrentlyActive ? [...prev, featureId] : prev.filter((id) => id !== featureId));
-                if (featureId === 'sign-text') {
-                    setModalityPreference(SIGN_TEXT_PREFERENCE_KEY, isCurrentlyActive);
-                }
+                setModalityPreference(featureId, isCurrentlyActive);
             }
         }
     };

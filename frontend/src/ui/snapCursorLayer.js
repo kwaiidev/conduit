@@ -15,17 +15,17 @@ const DISCOVERY_INTERVAL_MS = 220;
 const SYSTEM_DISCOVERY_INTERVAL_MS = 1200;
 const CV_DISCOVERY_INTERVAL_MS = 90;
 const CLUSTER_RADIUS_PX = 96;
-const DETECTION_RADIUS_PX = 260;
-const HOLD_RADIUS_PX = 78;
-const RELEASE_RADIUS_PX = 132;
-const SWITCH_HYSTERESIS = 0.14;
-const LOCK_SWITCH_HYSTERESIS = 0.22;
+const DETECTION_RADIUS_PX = 280;
+const HOLD_RADIUS_PX = 92;
+const RELEASE_RADIUS_PX = 168;
+const SWITCH_HYSTERESIS = 0.17;
+const LOCK_SWITCH_HYSTERESIS = 0.28;
 const MIN_HOTKEY_INTERVAL_MS = 140;
-const AUTO_LOCK_DWELL_MS = 260;
-const SLOW_SPEED_PX_PER_MS = 0.24;
+const AUTO_LOCK_DWELL_MS = 230;
+const SLOW_SPEED_PX_PER_MS = 0.3;
 const TARGET_COOLDOWN_MS = 640;
 const DETACH_ANIM_MS = 220;
-const CV_POINTER_STICK_MS = 180;
+const CV_POINTER_STICK_MS = 230;
 const DEFAULT_CV_STATUS_URL = "http://127.0.0.1:8767/status";
 const CV_BACKEND_CHECK_INTERVAL_MS = 900;
 function clamp(value, min, max) {
@@ -39,6 +39,29 @@ function clamp01(value) {
 }
 function distance(aX, aY, bX, bY) {
     return Math.hypot(bX - aX, bY - aY);
+}
+function distanceToTargetBounds(target, x, y) {
+    const right = target.left + target.width;
+    const bottom = target.top + target.height;
+    const dx = x < target.left ? target.left - x : (x > right ? x - right : 0);
+    const dy = y < target.top ? target.top - y : (y > bottom ? y - bottom : 0);
+    return Math.hypot(dx, dy);
+}
+function closestPointOnTargetBounds(target, x, y, inset = 0) {
+    const minX = target.left + inset;
+    const minY = target.top + inset;
+    const maxX = target.left + target.width - inset;
+    const maxY = target.top + target.height - inset;
+    if (maxX <= minX || maxY <= minY) {
+        return {
+            x: target.left + target.width * 0.5,
+            y: target.top + target.height * 0.5,
+        };
+    }
+    return {
+        x: clamp(x, minX, maxX),
+        y: clamp(y, minY, maxY),
+    };
 }
 function normalize(x, y) {
     const len = Math.hypot(x, y);
@@ -197,34 +220,43 @@ function buildClusters(targets) {
     });
 }
 function targetScore(target, pointerX, pointerY, velocityX, velocityY, suggestedId, lockedId, lockedClusterId, cooldownUntilByTarget, now) {
-    const d = distance(pointerX, pointerY, target.cx, target.cy);
-    if (d > DETECTION_RADIUS_PX * 1.25) {
+    const edgeDistance = distanceToTargetBounds(target, pointerX, pointerY);
+    if (edgeDistance > DETECTION_RADIUS_PX * 1.35) {
         return Number.POSITIVE_INFINITY;
     }
-    let score = d / DETECTION_RADIUS_PX;
+    const centerDistance = distance(pointerX, pointerY, target.cx, target.cy);
+    let score = (edgeDistance / DETECTION_RADIUS_PX) * 0.88 + (centerDistance / DETECTION_RADIUS_PX) * 0.12;
     score -= target.priority;
+    if (edgeDistance < 0.5) {
+        const insideX = Math.min(pointerX - target.left, (target.left + target.width) - pointerX);
+        const insideY = Math.min(pointerY - target.top, (target.top + target.height) - pointerY);
+        const depth = Math.max(0, Math.min(insideX, insideY));
+        const depthNorm = clamp01(depth / 24);
+        score -= 0.18 + depthNorm * 0.14;
+    }
     const speed = Math.hypot(velocityX, velocityY);
-    if (speed > 0.04) {
+    if (speed > 0.035) {
         const velocityNorm = normalize(velocityX, velocityY);
-        const toTarget = normalize(target.cx - pointerX, target.cy - pointerY);
+        const anchor = closestPointOnTargetBounds(target, pointerX, pointerY);
+        const toTarget = normalize(anchor.x - pointerX, anchor.y - pointerY);
         const alignment = velocityNorm.x * toTarget.x + velocityNorm.y * toTarget.y;
-        score -= alignment * 0.24;
+        score -= alignment * 0.22;
         if (alignment < -0.25) {
-            score += 0.08;
+            score += 0.1;
         }
     }
     if (target.id === suggestedId) {
-        score -= 0.09;
+        score -= 0.12;
     }
     if (target.id === lockedId) {
-        score -= 0.22;
+        score -= 0.3;
     }
     if (lockedClusterId !== null && target.clusterId === lockedClusterId) {
-        score -= 0.07;
+        score -= 0.1;
     }
     const cooldownUntil = cooldownUntilByTarget.get(target.id) || 0;
     if (cooldownUntil > now) {
-        score += 0.42;
+        score += 0.52;
     }
     return score;
 }
@@ -726,7 +758,7 @@ export default function SnapCursorLayer() {
             frame.lockedId = target.id;
             frame.suggestedId = target.id;
             frame.dwellMs = 0;
-            frame.snapBoostUntilMs = now + 170;
+            frame.snapBoostUntilMs = now + 220;
             if (target.source === "system" && typeof window.electron?.moveCursorToScreenPoint === "function") {
                 const offset = getWindowScreenOffset();
                 const x = target.cx + offset.x;
@@ -837,7 +869,7 @@ export default function SnapCursorLayer() {
                 }
             }
             if (!frame.lockedId && best) {
-                const distToBest = distance(frame.pointerX, frame.pointerY, best.target.cx, best.target.cy);
+                const distToBest = distanceToTargetBounds(best.target, frame.pointerX, frame.pointerY);
                 const speed = Math.hypot(frame.velocityX, frame.velocityY);
                 if (distToBest < HOLD_RADIUS_PX && speed < SLOW_SPEED_PX_PER_MS) {
                     frame.dwellMs += dt;
@@ -860,11 +892,13 @@ export default function SnapCursorLayer() {
             }
             const speed = Math.hypot(frame.velocityX, frame.velocityY);
             if (liveLockedTarget) {
-                const distToLock = distance(frame.pointerX, frame.pointerY, liveLockedTarget.cx, liveLockedTarget.cy);
-                const toLock = normalize(liveLockedTarget.cx - frame.pointerX, liveLockedTarget.cy - frame.pointerY);
+                const distToLock = distanceToTargetBounds(liveLockedTarget, frame.pointerX, frame.pointerY);
+                const lockAnchor = closestPointOnTargetBounds(liveLockedTarget, frame.pointerX, frame.pointerY);
+                const toLock = normalize(lockAnchor.x - frame.pointerX, lockAnchor.y - frame.pointerY);
                 const velNorm = normalize(frame.velocityX, frame.velocityY);
                 const movingAway = velNorm.x * toLock.x + velNorm.y * toLock.y < -0.35;
-                if ((distToLock > RELEASE_RADIUS_PX && speed > SLOW_SPEED_PX_PER_MS * 1.6) || (movingAway && speed > 0.28)) {
+                if ((distToLock > RELEASE_RADIUS_PX && speed > SLOW_SPEED_PX_PER_MS * 1.75)
+                    || (movingAway && distToLock > HOLD_RADIUS_PX * 0.8 && speed > 0.34)) {
                     releaseLock(now);
                 }
             }
@@ -875,15 +909,18 @@ export default function SnapCursorLayer() {
             let desiredX = frame.pointerX;
             let desiredY = frame.pointerY;
             if (liveSuggested) {
-                const distToSuggested = distance(frame.pointerX, frame.pointerY, liveSuggested.cx, liveSuggested.cy);
+                const distToSuggested = distanceToTargetBounds(liveSuggested, frame.pointerX, frame.pointerY);
                 const isLocked = frame.lockedId === liveSuggested.id;
+                const anchor = isLocked
+                    ? { x: liveSuggested.cx, y: liveSuggested.cy }
+                    : closestPointOnTargetBounds(liveSuggested, frame.pointerX, frame.pointerY, 6);
                 const magnet = isLocked
-                    ? 0.88
-                    : clamp01((DETECTION_RADIUS_PX - distToSuggested) / DETECTION_RADIUS_PX) * 0.34;
-                desiredX = frame.pointerX + (liveSuggested.cx - frame.pointerX) * magnet;
-                desiredY = frame.pointerY + (liveSuggested.cy - frame.pointerY) * magnet;
+                    ? 0.78
+                    : clamp01((DETECTION_RADIUS_PX - distToSuggested) / DETECTION_RADIUS_PX) * 0.32;
+                desiredX = frame.pointerX + (anchor.x - frame.pointerX) * magnet;
+                desiredY = frame.pointerY + (anchor.y - frame.pointerY) * magnet;
             }
-            const snapBoost = now < frame.snapBoostUntilMs ? 0.55 : 0.32;
+            const snapBoost = now < frame.snapBoostUntilMs ? 0.34 : 0.18;
             frame.displayX += (desiredX - frame.displayX) * snapBoost;
             frame.displayY += (desiredY - frame.displayY) * snapBoost;
             const detachProgress = clamp01((frame.detachUntilMs - now) / DETACH_ANIM_MS);

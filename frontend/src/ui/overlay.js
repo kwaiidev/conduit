@@ -3,7 +3,11 @@ import { useState, useEffect } from "react";
 import { Zap, Mic, MicOff, Keyboard, Info, Settings, Power, Maximize2, Hand, } from "lucide-react";
 import { enableASL, disableASL, getASLReady } from "../lib/aslcv";
 import { enableVoice, disableVoice, getVoiceReady } from "../lib/voicetts";
+import { getEEGPrediction } from "../lib/eeg";
 const SIGN_TEXT_PREFERENCE_KEY = "conduit-modality-intent-sign-text";
+const EEG_JAW_POLL_INTERVAL_MS = 120;
+const EEG_JAW_SIGNAL_HOLD_MS = 550;
+const EEG_MIN_CLENCH_CONFIDENCE = 0.4;
 function getModalityPreference() {
     if (typeof window === "undefined" || !window.localStorage) {
         return null;
@@ -19,6 +23,16 @@ function setModalityPreference(enabled) {
         return;
     }
     localStorage.setItem(SIGN_TEXT_PREFERENCE_KEY, enabled ? "1" : "0");
+}
+function isTypingTarget(target) {
+    if (!(target instanceof HTMLElement)) {
+        return false;
+    }
+    const tagName = target.tagName;
+    return (target.isContentEditable ||
+        tagName === "INPUT" ||
+        tagName === "TEXTAREA" ||
+        tagName === "SELECT");
 }
 export default function OverlayBar() {
     const isMacOS = typeof navigator !== "undefined" &&
@@ -76,18 +90,65 @@ export default function OverlayBar() {
             setModalityPreference(!next);
         }
     };
-    // Simulate jaw signals for demo (hum on/off soft pink). Replace with real EEG/sensor data.
     useEffect(() => {
-        const t = setInterval(() => {
-            setLeftJawSignal((s) => !s);
-        }, 2000);
-        return () => clearInterval(t);
-    }, []);
+        const onKeyDown = (event) => {
+            if (event.defaultPrevented ||
+                event.repeat ||
+                event.metaKey ||
+                event.ctrlKey ||
+                event.altKey ||
+                isTypingTarget(event.target)) {
+                return;
+            }
+            if (event.key === ",") {
+                event.preventDefault();
+                void toggleVoice();
+            }
+            else if (event.key === ".") {
+                event.preventDefault();
+                void toggleASL();
+            }
+        };
+        window.addEventListener("keydown", onKeyDown);
+        return () => window.removeEventListener("keydown", onKeyDown);
+    }, [toggleASL, toggleVoice]);
     useEffect(() => {
-        const t = setInterval(() => {
-            setRightJawSignal((s) => !s);
-        }, 2500);
-        return () => clearInterval(t);
+        let cancelled = false;
+        let pollTimer;
+        let lastLeftSignalAt = 0;
+        let lastRightSignalAt = 0;
+        const applyJawSignals = (now) => {
+            setLeftJawSignal(now - lastLeftSignalAt <= EEG_JAW_SIGNAL_HOLD_MS);
+            setRightJawSignal(now - lastRightSignalAt <= EEG_JAW_SIGNAL_HOLD_MS);
+        };
+        const pollJawSignals = async () => {
+            const now = Date.now();
+            const prediction = await getEEGPrediction();
+            if (prediction?.active &&
+                prediction.confidence >= EEG_MIN_CLENCH_CONFIDENCE &&
+                prediction.ageMs <= EEG_JAW_SIGNAL_HOLD_MS) {
+                if (prediction.prediction === 1) {
+                    lastLeftSignalAt = now;
+                }
+                else if (prediction.prediction === 2) {
+                    lastRightSignalAt = now;
+                }
+            }
+            if (cancelled) {
+                return;
+            }
+            applyJawSignals(now);
+        };
+        void pollJawSignals();
+        pollTimer = window.setInterval(() => {
+            void pollJawSignals();
+        }, EEG_JAW_POLL_INTERVAL_MS);
+        return () => {
+            cancelled = true;
+            if (pollTimer !== undefined) {
+                window.clearInterval(pollTimer);
+            }
+        };
     }, []);
     const exitOverlay = async () => {
         if (isSwitchingOverlay) {
@@ -291,7 +352,7 @@ const styles = {
         display: "flex",
         alignItems: "center",
         gap: 6,
-        padding: "8px 14px",
+        padding: "6px 14px",
         background: "#FF2D8D",
         border: "none",
         borderRadius: 10,

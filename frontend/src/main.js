@@ -80,7 +80,7 @@ const PendingRouteRedirect = () => {
     return null;
 };
 const App = () => {
-    return (_jsx(ThemeProvider, { children: _jsxs(BrowserRouter, { children: [_jsx(PendingRouteRedirect, {}), _jsxs(Routes, { children: [_jsx(Route, { path: "/onboarding", element: _jsx(Onboarding, {}) }), _jsx(Route, { path: "/home", element: _jsx(ProtectedRoute, { children: _jsx(Shell, { children: _jsx(Home, {}) }) }) }), _jsx(Route, { path: "/visuals", element: _jsx(ProtectedRoute, { children: _jsx(Shell, { children: _jsx(Visuals, {}) }) }) }), _jsx(Route, { path: "/", element: _jsx(Navigate, { to: hasCompletedOnboarding() ? "/home" : "/onboarding", replace: true }) }), _jsx(Route, { path: "*", element: _jsx(Navigate, { to: hasCompletedOnboarding() ? "/home" : "/onboarding", replace: true }) })] }), _jsx(SnapCursorRoot, {})] }) }));
+    return (_jsx(ThemeProvider, { children: _jsxs(BrowserRouter, { children: [_jsx(PendingRouteRedirect, {}), _jsxs(Routes, { children: [_jsx(Route, { path: "/onboarding", element: _jsx(Onboarding, {}) }), _jsx(Route, { path: "/home", element: _jsx(ProtectedRoute, { children: _jsx(Shell, { children: _jsx(Home, {}) }) }) }), _jsx(Route, { path: "/visuals", element: _jsx(ProtectedRoute, { children: _jsx(Shell, { children: _jsx(Visuals, {}) }) }) }), _jsx(Route, { path: "/", element: _jsx(Navigate, { to: "/onboarding", replace: true }) }), _jsx(Route, { path: "*", element: _jsx(Navigate, { to: "/onboarding", replace: true }) })] }), _jsx(SnapCursorRoot, {})] }) }));
 };
 // Decides whether to show overlay bar only (overlay window) or full app (router).
 const AppBoot = () => {
