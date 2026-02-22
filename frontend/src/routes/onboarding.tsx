@@ -8,6 +8,7 @@ import { JawClenchTrainingMiddle } from "./onboarding/jawmiddle";
 import { JawClenchTrainingRight } from "./onboarding/jawright";
 import { JawClenchTrainingLeft } from "./onboarding/jawleft";
 import { JawClenchTrainingSlack } from "./onboarding/jawslack";
+import { CVCursorCalibrationCenter } from "./onboarding/cvcalibrate";
 
 export default function Onboarding() {
   const nav = useNavigate();
@@ -134,6 +135,11 @@ const steps = [
     title: "Welcome to Conduit",
     description: "You can do anything you put your mind to.",
     content: <div className="placeholder-content">🧠 Welcome screen</div>,
+  },
+  {
+    title: "Calibrate CV Cursor",
+    description: "You can do anything you put your mind to.",
+    content: <CVCursorCalibrationCenter />,
   },
   {
     title: "Connect Your EEG Device",

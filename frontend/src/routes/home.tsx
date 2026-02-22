@@ -37,21 +37,18 @@ export default function Home() {
       title: "Pointer Control",
       features: [
         { id: 'cv-pointer', icon: <MousePointer2 size={20} />, name: "CV Cursor", description: "Head/eye movement control" },
-        { id: 'smoothing', icon: <Activity size={20} />, name: "Smoothing", description: "Filter micro-tremors" },
       ]
     },
     {
       title: "Selection",
       features: [
         { id: 'eeg-select', icon: <Zap size={20} />, name: "EEG Jaw Clench", description: "Neural signal selection", training: true },
-        { id: 'dwell-click', icon: <Eye size={20} />, name: "Dwell Click", description: "Gaze-hold selection" },
       ]
     },
     {
       title: "Text Input",
       features: [
         { id: 'voice-text', icon: <Mic size={20} />, name: "Voice-to-Text", description: "Natural dictation engine" },
-        { id: 'optic-keyboard', icon: <Type size={20} />, name: "Optic Keyboard", description: "Gaze-optimized typing" },
         { id: 'sign-text', icon: <Mic size={20} />, name: "Sign-to-Text", description: "Sign to text conversion"}
       ]
     }

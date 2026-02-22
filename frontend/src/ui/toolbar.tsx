@@ -51,12 +51,6 @@ export default function CompactToolbar() {
           label="Visuals"
           icon={BarChart3}
         />
-        <ToolbarButton
-          active={false}
-          onClick={() => navigate("/settings")}
-          label="Settings"
-          icon={Settings}
-        />
       </div>
 
       <div style={styles.right} className="app-no-drag">
