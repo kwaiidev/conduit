@@ -2,6 +2,7 @@ import React, { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { enableASL, disableASL, getASLReady } from "../lib/aslcv";
 import { enableVoice, disableVoice, getVoiceReady } from "../lib/voicetts";
+import { enableEEG, disableEEG } from "../lib/eeg";
 import { motion } from "motion/react";
 import { 
   MousePointer2, 
@@ -93,6 +94,21 @@ export default function Home() {
         }
       } catch (e) {
         console.error(`${featureId} toggle failed:`, e);
+        setActiveModes((prev) =>
+          isCurrentlyActive ? [...prev, featureId] : prev.filter((id) => id !== featureId)
+        );
+      }
+    }
+    if (featureId === 'eeg-select') {
+      try {
+        if (next) {
+          await enableEEG();
+        } else {
+          await disableEEG();
+        }
+      } catch (e) {
+        console.error("ASL toggle failed:", e);
+        // Revert on failure
         setActiveModes((prev) =>
           isCurrentlyActive ? [...prev, featureId] : prev.filter((id) => id !== featureId)
         );
