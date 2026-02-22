@@ -83,6 +83,21 @@ export default function Home() {
       next ? [...prev, featureId] : prev.filter((id) => id !== featureId)
     );
 
+    if (featureId === 'eeg-select') {
+      try {
+        if (next) {
+          await enableEEG();
+        } else {
+          await disableEEG();
+        }
+      } catch (e) {
+        console.error("EEG toggle failed:", e);
+        // Revert on failure
+        setActiveModes((prev) =>
+          isCurrentlyActive ? [...prev, featureId] : prev.filter((id) => id !== featureId)
+        );
+      }
+    }
     if (featureId === 'sign-text' || featureId === 'voice-text') {
       const enable = featureId === 'sign-text' ? enableASL : enableVoice;
       const disable = featureId === 'sign-text' ? disableASL : disableVoice;
@@ -94,21 +109,6 @@ export default function Home() {
         }
       } catch (e) {
         console.error(`${featureId} toggle failed:`, e);
-        setActiveModes((prev) =>
-          isCurrentlyActive ? [...prev, featureId] : prev.filter((id) => id !== featureId)
-        );
-      }
-    }
-    if (featureId === 'eeg-select') {
-      try {
-        if (next) {
-          await enableEEG();
-        } else {
-          await disableEEG();
-        }
-      } catch (e) {
-        console.error("EEG toggle failed:", e);
-        // Revert on failure
         setActiveModes((prev) =>
           isCurrentlyActive ? [...prev, featureId] : prev.filter((id) => id !== featureId)
         );
