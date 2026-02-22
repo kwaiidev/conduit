@@ -43,6 +43,7 @@ import sys
 import re
 from contextlib import asynccontextmanager
 from datetime import datetime
+import pyautogui
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -135,6 +136,7 @@ CLEAN_SYSTEM_PROMPT = (
     "## Code rules\n"
     "Write a self-contained Python snippet between CODE: and END_CODE. "
     "It runs via exec() so no top-level return statements. "
+    "Use subprocess, os, sys, shutil, webbrowser, pathlib, pyautogui as needed. "
     "Use subprocess, os, sys, shutil, webbrowser, pathlib, datetime, time as needed. "
     "Detect OS via sys.platform ('win32', 'darwin', 'linux'). "
     "For volume: use 'amixer' on Linux, 'osascript' on mac, 'nircmd' on Windows. "
