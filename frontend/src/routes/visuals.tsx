@@ -83,7 +83,7 @@ export default function Visualizations() {
                         rightSlot={<Pill label="8–16 Hz α" />}
                     />
                     <div style={styles.panelBody}>
-                        <PlaceholderCanvas label="Heatmap goes here" />
+												<img src="http://localhost:5000/stream"/>
                     </div>
                 </motion.div>
 
@@ -95,7 +95,7 @@ export default function Visualizations() {
                         rightSlot={<Pill label="Raw / Filtered" />}
                     />
                     <div style={styles.panelBody}>
-                        <PlaceholderCanvas label="Wave visualizer goes here" />
+												<img src="http://localhost:5000/waves"/>
                     </div>
                 </motion.div>
             </motion.section>
