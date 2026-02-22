@@ -107,7 +107,7 @@ export default function Home() {
           await disableEEG();
         }
       } catch (e) {
-        console.error("ASL toggle failed:", e);
+        console.error("EEG toggle failed:", e);
         // Revert on failure
         setActiveModes((prev) =>
           isCurrentlyActive ? [...prev, featureId] : prev.filter((id) => id !== featureId)
