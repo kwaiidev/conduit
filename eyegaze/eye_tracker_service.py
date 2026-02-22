@@ -10,6 +10,7 @@ import traceback
 import sys
 import threading
 import time
+import zlib
 from pathlib import Path
 from collections import deque
 from typing import Any, Dict, Optional
@@ -201,14 +202,364 @@ class EyeTrackerService:
         self._last_orbit_debug = 0.0
         self._screen_position_file = args.screen_position_file if args.screen_position_file else None
 
-        self.cap = cv2.VideoCapture(args.camera)
-        if not self.cap.isOpened():
+        self._camera_warmup_timeout_s = max(0.5, float(getattr(args, "camera_warmup_timeout_s", 3.0)))
+        self._camera_warmup_valid_frames = max(1, int(getattr(args, "camera_warmup_valid_frames", 3)))
+        self._camera_recover_after_failures = max(1, int(getattr(args, "camera_recover_after_failures", 8)))
+        self._camera_recover_after_invalid = max(1, int(getattr(args, "camera_recover_after_invalid", 8)))
+        self._camera_recover_cooldown_s = max(0.1, float(getattr(args, "camera_recover_cooldown_s", 1.25)))
+        self._camera_min_luma = float(getattr(args, "camera_min_luma", 8.0))
+        self._camera_max_luma = float(getattr(args, "camera_max_luma", 247.0))
+        self._camera_min_luma_std = float(getattr(args, "camera_min_luma_std", 6.0))
+        self._camera_min_dynamic_range = float(getattr(args, "camera_min_dynamic_range", 16.0))
+        self._camera_min_saturation = float(getattr(args, "camera_min_saturation", 3.0))
+        self._camera_recover_after_stale = max(3, int(getattr(args, "camera_recover_after_stale", 18)))
+        self._camera_backend = "default"
+        self._camera_ready = False
+        self._camera_status = "initializing"
+        self._camera_fail_streak = 0
+        self._camera_invalid_streak = 0
+        self._camera_stale_streak = 0
+        self._camera_recovery_count = 0
+        self._camera_last_valid_frame_ms = 0
+        self._camera_ready_since_ms = 0
+        self._camera_last_recover_attempt_s = 0.0
+        self._camera_last_issue_log_s = 0.0
+        self._camera_last_cache_ms = 0
+        self._camera_last_signature: Optional[int] = None
+        self._camera_last_frame_stats: Dict[str, float] = {}
+        self._last_valid_camera_frame: Optional[np.ndarray] = None
+        self._startup_debug = bool(getattr(args, "startup_debug", False))
+        self._startup_debug_interval_s = max(0.2, float(getattr(args, "startup_debug_interval_s", 1.0)))
+        self._startup_last_debug_s = 0.0
+        self._warmup_debug_interval_s = max(0.1, min(2.0, self._startup_debug_interval_s * 0.5))
+
+        self.cap = self._open_camera_capture(args.camera)
+        if self.cap is None:
             raise RuntimeError(f"Unable to open camera {args.camera}")
+        if not self._warmup_camera():
+            print("[Tracker] camera warmup timed out; waiting for stable frames.")
+
+    def _is_startup_debug(self) -> bool:
+        return bool(self.args.debug or self._startup_debug)
+
+    def _camera_stats_summary(self) -> str:
+        if not self._camera_last_frame_stats:
+            return "no_stats"
+        stats = self._camera_last_frame_stats
+        pieces = []
+        for key in ("luma_mean", "luma_std", "dynamic_range", "sat_mean", "stale_streak"):
+            if key in stats:
+                pieces.append(f"{key}={stats[key]}")
+        return ", ".join(pieces) if pieces else "no_stats"
+
+    def _startup_log(self, message: str, *, force: bool = False) -> None:
+        if not self._is_startup_debug():
+            return
+        now = time.time()
+        if force or now - self._startup_last_debug_s >= self._startup_debug_interval_s:
+            print(f"[Tracker][startup] {message}")
+            self._startup_last_debug_s = now
+
+    def _camera_capture_candidates(self) -> list[tuple[str, Optional[int]]]:
+        candidates: list[tuple[str, Optional[int]]] = [("default", None)]
+        if sys.platform == "darwin" and hasattr(cv2, "CAP_AVFOUNDATION"):
+            candidates.insert(0, ("avfoundation", int(cv2.CAP_AVFOUNDATION)))
+        elif sys.platform.startswith("linux") and hasattr(cv2, "CAP_V4L2"):
+            candidates.insert(0, ("v4l2", int(cv2.CAP_V4L2)))
+        elif sys.platform.startswith("win") and hasattr(cv2, "CAP_DSHOW"):
+            candidates.insert(0, ("dshow", int(cv2.CAP_DSHOW)))
+        return candidates
+
+    def _configure_camera_capture(self, cap: Any) -> None:
+        props: list[tuple[int, float]] = []
+        if hasattr(cv2, "CAP_PROP_BUFFERSIZE"):
+            props.append((cv2.CAP_PROP_BUFFERSIZE, 1))
+        if hasattr(cv2, "CAP_PROP_FPS"):
+            props.append((cv2.CAP_PROP_FPS, 30))
+        if hasattr(cv2, "CAP_PROP_CONVERT_RGB"):
+            props.append((cv2.CAP_PROP_CONVERT_RGB, 1))
+        if hasattr(cv2, "CAP_PROP_AUTO_WB"):
+            props.append((cv2.CAP_PROP_AUTO_WB, 1))
+        for prop_id, value in props:
+            try:
+                cap.set(prop_id, value)
+            except Exception:
+                continue
+
+    def _open_camera_capture(self, camera_index: int) -> Optional[Any]:
+        for backend_name, backend_id in self._camera_capture_candidates():
+            self._startup_log(
+                f"camera_open_attempt index={camera_index} backend={backend_name}",
+                force=True,
+            )
+            cap = None
+            try:
+                if backend_id is None:
+                    cap = cv2.VideoCapture(camera_index)
+                else:
+                    cap = cv2.VideoCapture(camera_index, backend_id)
+            except Exception:
+                cap = None
+            if cap is None or not cap.isOpened():
+                if cap is not None:
+                    try:
+                        cap.release()
+                    except Exception:
+                        pass
+                self._startup_log(
+                    f"camera_open_failed index={camera_index} backend={backend_name}",
+                    force=True,
+                )
+                continue
+            self._configure_camera_capture(cap)
+            self._camera_backend = backend_name
+            self._startup_log(
+                f"camera_open_success index={camera_index} backend={backend_name}",
+                force=True,
+            )
+            return cap
+        return None
+
+    def _set_camera_issue(self, status: str) -> None:
+        prev_status = self._camera_status
+        self._camera_ready = False
+        self._camera_status = status
+        now = time.time()
+        if now - self._camera_last_issue_log_s >= 1.0:
+            print(f"[Tracker] camera status: {status}")
+            self._camera_last_issue_log_s = now
+        if status != prev_status:
+            self._startup_log(
+                f"camera_status={status} backend={self._camera_backend} stats=[{self._camera_stats_summary()}]",
+                force=True,
+            )
+
+    def _camera_frame_quality(self, frame_bgr: np.ndarray) -> tuple[bool, str]:
+        if frame_bgr is None:
+            self._camera_last_frame_stats = {}
+            return False, "frame_none"
+        if frame_bgr.size == 0:
+            self._camera_last_frame_stats = {}
+            return False, "frame_empty"
+        if frame_bgr.ndim != 3 or frame_bgr.shape[2] < 3:
+            self._camera_last_frame_stats = {}
+            return False, "frame_invalid_shape"
+
         try:
-            self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-            self.cap.set(cv2.CAP_PROP_FPS, 30)
+            gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
         except Exception:
-            pass
+            self._camera_last_frame_stats = {}
+            return False, "frame_conversion_failed"
+
+        sample = gray
+        if gray.shape[0] > 120 or gray.shape[1] > 160:
+            try:
+                sample = cv2.resize(gray, (160, 120), interpolation=cv2.INTER_AREA)
+            except Exception:
+                sample = gray
+
+        sat_mean = 0.0
+        sat_std = 0.0
+        try:
+            hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
+            sat = hsv[:, :, 1]
+            sat_sample = sat
+            if sat.shape[0] > 120 or sat.shape[1] > 160:
+                sat_sample = cv2.resize(sat, (160, 120), interpolation=cv2.INTER_AREA)
+            sat_mean = float(np.mean(sat_sample))
+            sat_std = float(np.std(sat_sample))
+        except Exception:
+            sat_mean = 0.0
+            sat_std = 0.0
+
+        luma_mean = float(np.mean(sample))
+        luma_std = float(np.std(sample))
+        p5 = float(np.percentile(sample, 5))
+        p95 = float(np.percentile(sample, 95))
+        dynamic_range = p95 - p5
+        signature = int(zlib.crc32(sample))
+        if self._camera_last_signature is not None and signature == self._camera_last_signature:
+            self._camera_stale_streak += 1
+        else:
+            self._camera_stale_streak = 0
+        self._camera_last_signature = signature
+        self._camera_last_frame_stats = {
+            "luma_mean": round(luma_mean, 3),
+            "luma_std": round(luma_std, 3),
+            "dynamic_range": round(dynamic_range, 3),
+            "sat_mean": round(sat_mean, 3),
+            "sat_std": round(sat_std, 3),
+            "stale_streak": float(self._camera_stale_streak),
+        }
+
+        if luma_mean < self._camera_min_luma:
+            return False, "frame_too_dark"
+        if luma_mean > self._camera_max_luma:
+            return False, "frame_overexposed"
+        if luma_std < self._camera_min_luma_std:
+            return False, "frame_low_contrast"
+        if dynamic_range < self._camera_min_dynamic_range:
+            return False, "frame_low_dynamic_range"
+        if sat_mean < self._camera_min_saturation and luma_std < max(8.0, self._camera_min_luma_std * 1.6):
+            return False, "frame_desaturated"
+        if self._camera_stale_streak >= self._camera_recover_after_stale:
+            return False, "frame_stale"
+        return True, "ok"
+
+    def _mark_camera_frame_valid(self, frame_bgr: np.ndarray) -> None:
+        was_ready = self._camera_ready
+        now = now_ms()
+        self._camera_fail_streak = 0
+        self._camera_invalid_streak = 0
+        self._camera_last_valid_frame_ms = now
+        if not was_ready:
+            self._camera_ready_since_ms = now
+        self._camera_ready = True
+        self._camera_status = "ready"
+        if not was_ready:
+            self._startup_log(
+                f"camera_ready=true backend={self._camera_backend} stats=[{self._camera_stats_summary()}]",
+                force=True,
+            )
+
+        if self._last_valid_camera_frame is None or now - self._camera_last_cache_ms >= 120:
+            self._last_valid_camera_frame = frame_bgr.copy()
+            self._camera_last_cache_ms = now
+
+    def _camera_status_frame(self, headline: str, detail: str) -> np.ndarray:
+        if self._last_valid_camera_frame is not None:
+            frame = self._last_valid_camera_frame.copy()
+        else:
+            frame = np.zeros((360, 640, 3), dtype=np.uint8)
+            frame[:, :] = (24, 36, 52)
+
+        width = int(frame.shape[1])
+        cv2.rectangle(
+            frame,
+            (0, 0),
+            (width - 1, 74),
+            (15, 20, 26),
+            -1,
+        )
+        cv2.putText(
+            frame,
+            headline[:64],
+            (16, 30),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (255, 255, 255),
+            2,
+        )
+        cv2.putText(
+            frame,
+            detail[:96],
+            (16, 56),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            (178, 206, 255),
+            1,
+        )
+        return frame
+
+    def _warmup_camera(self) -> bool:
+        if self.cap is None:
+            self._set_camera_issue("camera_unavailable")
+            return False
+
+        self._set_camera_issue("warming_up")
+        self._startup_log(
+            f"warmup_start timeout_s={self._camera_warmup_timeout_s:.2f} valid_frames={self._camera_warmup_valid_frames}",
+            force=True,
+        )
+        valid_frames = 0
+        read_failures = 0
+        deadline = time.time() + self._camera_warmup_timeout_s
+        last_log = 0.0
+
+        while time.time() < deadline:
+            ret, frame = self.cap.read()
+            if not ret or frame is None:
+                read_failures += 1
+                now = time.time()
+                if self._is_startup_debug() and now - last_log >= self._warmup_debug_interval_s:
+                    remaining = max(0.0, deadline - now)
+                    self._startup_log(
+                        f"warmup_waiting_for_frame read_failures={read_failures} remaining_s={remaining:.2f}",
+                        force=True,
+                    )
+                    last_log = now
+                time.sleep(0.03)
+                continue
+
+            frame_ok, reason = self._camera_frame_quality(frame)
+            if not frame_ok:
+                valid_frames = 0
+                self._set_camera_issue(f"warming_up:{reason}")
+                now = time.time()
+                if self._is_startup_debug() and now - last_log >= self._warmup_debug_interval_s:
+                    remaining = max(0.0, deadline - now)
+                    self._startup_log(
+                        f"warmup_invalid reason={reason} remaining_s={remaining:.2f} stats=[{self._camera_stats_summary()}]",
+                        force=True,
+                    )
+                    last_log = now
+                time.sleep(0.03)
+                continue
+
+            valid_frames += 1
+            self._mark_camera_frame_valid(frame)
+            if self._is_startup_debug():
+                self._startup_log(
+                    f"warmup_progress valid_frames={valid_frames}/{self._camera_warmup_valid_frames} stats=[{self._camera_stats_summary()}]",
+                    force=True,
+                )
+            if valid_frames >= self._camera_warmup_valid_frames:
+                self._startup_log("warmup_complete", force=True)
+                return True
+            time.sleep(0.01)
+
+        self._set_camera_issue("warming_up:timeout")
+        self._startup_log(
+            f"warmup_timeout stats=[{self._camera_stats_summary()}] read_failures={read_failures}",
+            force=True,
+        )
+        return False
+
+    def _recover_camera_capture(self, reason: str) -> bool:
+        now = time.time()
+        if now - self._camera_last_recover_attempt_s < self._camera_recover_cooldown_s:
+            return False
+        self._camera_last_recover_attempt_s = now
+        self._camera_recovery_count += 1
+        self._camera_last_signature = None
+        self._camera_stale_streak = 0
+        self._startup_log(
+            f"recover_attempt reason={reason} count={self._camera_recovery_count}",
+            force=True,
+        )
+        self._set_camera_issue(f"recovering:{reason}")
+
+        if self.cap is not None:
+            try:
+                self.cap.release()
+            except Exception:
+                pass
+            self.cap = None
+
+        time.sleep(0.08)
+        self.cap = self._open_camera_capture(self.args.camera)
+        if self.cap is None:
+            self._set_camera_issue("camera_open_failed")
+            self._startup_log("recover_failed:camera_open_failed", force=True)
+            return False
+
+        if self._warmup_camera():
+            print(f"[Tracker] camera recovered via {self._camera_backend}.")
+            self._startup_log(f"recover_success backend={self._camera_backend}", force=True)
+            return True
+        self._set_camera_issue("recover_warmup_timeout")
+        self._startup_log("recover_failed:warmup_timeout", force=True)
+        return False
 
     @staticmethod
     def _get_zero_cursor() -> list[int]:
@@ -769,6 +1120,10 @@ class EyeTrackerService:
             f"legacy_3d_invert_both={'on' if self.args.legacy_3d_invert_both else 'off'} | "
             f"cursor_mode={self.args.cursor_mode}"
         )
+        self._startup_log(
+            f"startup_debug_enabled interval_s={self._startup_debug_interval_s:.2f} backend={self._camera_backend}",
+            force=True,
+        )
 
         if self.args.debug:
             for window_name in ("Integrated Eye Tracking", "Head/Eye Debug"):
@@ -784,12 +1139,91 @@ class EyeTrackerService:
 
         last_toggle = 0.0
         last_calibration_key = 0.0
+        last_runtime_heartbeat = 0.0
+        loop_count = 0
+
+        def _handle_runtime_controls(last_toggle_state: float) -> tuple[bool, float, int]:
+            key_local = self._read_key()
+            if self._is_key_down("f7"):
+                if time.time() - last_toggle_state > 0.35:
+                    self.mouse_control_enabled = not self.mouse_control_enabled
+                    print(f"[Mouse Control] {'Enabled' if self.mouse_control_enabled else 'Disabled'}")
+                    last_toggle_state = time.time()
+                    time.sleep(0.1)
+            should_quit = key_local in (ord("q"), ord("Q"), 27, ord("-"), ord("_")) or self._is_key_down("q")
+            return should_quit, last_toggle_state, key_local
+
         running = True
         while running:
+            loop_count += 1
+            heartbeat_now = time.time()
+            if self._is_startup_debug() and heartbeat_now - last_runtime_heartbeat >= self._startup_debug_interval_s:
+                self._startup_log(
+                    "loop_alive "
+                    f"iter={loop_count} ready={self._camera_ready} status={self._camera_status} "
+                    f"fail={self._camera_fail_streak} invalid={self._camera_invalid_streak} stale={self._camera_stale_streak} "
+                    f"recoveries={self._camera_recovery_count} stats=[{self._camera_stats_summary()}]",
+                    force=True,
+                )
+                last_runtime_heartbeat = heartbeat_now
+
+            if self.cap is None:
+                self._emit_noop("camera_unavailable")
+                self._set_camera_issue("camera_unavailable")
+                self._recover_camera_capture("capture_none")
+                status_frame = self._camera_status_frame(
+                    "Camera unavailable",
+                    "Trying to recover camera stream",
+                )
+                self._publish_http_frame(status_frame)
+                if self.args.debug:
+                    cv2.imshow("Integrated Eye Tracking", status_frame)
+                should_quit, last_toggle, _ = _handle_runtime_controls(last_toggle)
+                if should_quit:
+                    running = False
+                continue
+
             ret, frame = self.cap.read()
-            if not ret:
+            if not ret or frame is None:
+                self._camera_fail_streak += 1
                 self._emit_noop("camera_frame_missing")
-                break
+                self._set_camera_issue("frame_missing")
+                if self._camera_fail_streak >= self._camera_recover_after_failures:
+                    self._recover_camera_capture("missing_frames")
+                    self._camera_fail_streak = 0
+                status_frame = self._camera_status_frame(
+                    "Camera initializing",
+                    "Waiting for readable frame",
+                )
+                self._publish_http_frame(status_frame)
+                if self.args.debug:
+                    cv2.imshow("Integrated Eye Tracking", status_frame)
+                should_quit, last_toggle, _ = _handle_runtime_controls(last_toggle)
+                if should_quit:
+                    running = False
+                continue
+
+            frame_ok, frame_reason = self._camera_frame_quality(frame)
+            if not frame_ok:
+                self._camera_invalid_streak += 1
+                self._emit_noop(f"camera_frame_invalid:{frame_reason}")
+                self._set_camera_issue(frame_reason)
+                if frame_reason == "frame_stale" or self._camera_invalid_streak >= self._camera_recover_after_invalid:
+                    self._recover_camera_capture(frame_reason)
+                    self._camera_invalid_streak = 0
+                status_frame = self._camera_status_frame(
+                    "Stabilizing camera",
+                    frame_reason.replace("_", " "),
+                )
+                self._publish_http_frame(status_frame)
+                if self.args.debug:
+                    cv2.imshow("Integrated Eye Tracking", status_frame)
+                should_quit, last_toggle, _ = _handle_runtime_controls(last_toggle)
+                if should_quit:
+                    running = False
+                continue
+
+            self._mark_camera_frame_valid(frame)
 
             if not self._cv_processing_enabled:
                 if self.args.debug:
@@ -803,14 +1237,8 @@ class EyeTrackerService:
                         2,
                     )
                 self._publish_http_frame(frame)
-                key = self._read_key()
-                if self._is_key_down("f7"):
-                    if time.time() - last_toggle > 0.35:
-                        self.mouse_control_enabled = not self.mouse_control_enabled
-                        print(f"[Mouse Control] {'Enabled' if self.mouse_control_enabled else 'Disabled'}")
-                        last_toggle = time.time()
-                        time.sleep(0.1)
-                if key in (ord("q"), ord("Q"), 27, ord("-"), ord("_")) or self._is_key_down("q"):
+                should_quit, last_toggle, _ = _handle_runtime_controls(last_toggle)
+                if should_quit:
                     running = False
                 continue
 
@@ -1096,16 +1524,10 @@ class EyeTrackerService:
 
             self._publish_http_frame(frame)
 
-            key = self._read_key()
-            if self._is_key_down("f7"):
-                if time.time() - last_toggle > 0.35:
-                    self.mouse_control_enabled = not self.mouse_control_enabled
-                    print(f"[Mouse Control] {'Enabled' if self.mouse_control_enabled else 'Disabled'}")
-                    last_toggle = time.time()
-                    time.sleep(0.1)
-
-            if key in (ord("q"), ord("Q"), 27, ord("-"), ord("_")) or self._is_key_down("q"):
+            should_quit, last_toggle, key = _handle_runtime_controls(last_toggle)
+            if should_quit:
                 running = False
+                continue
 
             if key == ord("c"):
                 now = time.time()
@@ -2066,6 +2488,18 @@ class EyeTrackerService:
             },
             "event_bus_port": self.args.port,
             "mouse_control": self.mouse_control_enabled,
+            "camera": {
+                "ready": self._camera_ready,
+                "status": self._camera_status,
+                "backend": self._camera_backend,
+                "recoveries": self._camera_recovery_count,
+                "fail_streak": self._camera_fail_streak,
+                "invalid_streak": self._camera_invalid_streak,
+                "stale_streak": self._camera_stale_streak,
+                "last_valid_frame_ms": self._camera_last_valid_frame_ms,
+                "ready_since_ms": self._camera_ready_since_ms,
+                "last_frame_stats": self._camera_last_frame_stats,
+            },
         }
 
     def _http_state(self) -> Dict[str, Any]:
@@ -2082,6 +2516,13 @@ class EyeTrackerService:
             "streaming": self._http_streaming_enabled,
             "is_recording": self._ptt_recording,
             "last_clean_text": self._ptt_last_clean_text,
+            "camera_ready": self._camera_ready,
+            "camera_status": self._camera_status,
+            "camera_backend": self._camera_backend,
+            "camera_recoveries": self._camera_recovery_count,
+            "camera_stale_streak": self._camera_stale_streak,
+            "camera_last_valid_frame_ms": self._camera_last_valid_frame_ms,
+            "camera_last_frame_stats": self._camera_last_frame_stats,
             "run_seconds": round((now_ms() - self._service_start_ms) / 1000.0, 3),
             "http": {
                 "enabled": self._http_enabled,
@@ -2154,7 +2595,85 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--http-streaming", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--emit-interval-ms", type=int, default=16)
     parser.add_argument("--debug", action="store_true")
+    parser.add_argument(
+        "--startup-debug",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Enable temporary startup diagnostics in stdout.",
+    )
+    parser.add_argument(
+        "--startup-debug-interval-s",
+        type=float,
+        default=1.0,
+        help="Seconds between startup debug heartbeat logs.",
+    )
     parser.add_argument("--blink-ear-threshold", type=float, default=0.21)
+    parser.add_argument(
+        "--camera-warmup-timeout-s",
+        type=float,
+        default=3.0,
+        help="Seconds to wait for stable camera frames before entering retry mode.",
+    )
+    parser.add_argument(
+        "--camera-warmup-valid-frames",
+        type=int,
+        default=3,
+        help="Consecutive valid frames required before camera is considered ready.",
+    )
+    parser.add_argument(
+        "--camera-recover-after-failures",
+        type=int,
+        default=8,
+        help="Recover camera after this many consecutive read failures.",
+    )
+    parser.add_argument(
+        "--camera-recover-after-invalid",
+        type=int,
+        default=8,
+        help="Recover camera after this many consecutive invalid/flat frames.",
+    )
+    parser.add_argument(
+        "--camera-recover-after-stale",
+        type=int,
+        default=18,
+        help="Recover camera after this many consecutive unchanged frames.",
+    )
+    parser.add_argument(
+        "--camera-recover-cooldown-s",
+        type=float,
+        default=1.25,
+        help="Minimum seconds between camera recovery attempts.",
+    )
+    parser.add_argument(
+        "--camera-min-luma",
+        type=float,
+        default=8.0,
+        help="Minimum luma mean before a frame is treated as too dark.",
+    )
+    parser.add_argument(
+        "--camera-max-luma",
+        type=float,
+        default=247.0,
+        help="Maximum luma mean before a frame is treated as overexposed.",
+    )
+    parser.add_argument(
+        "--camera-min-luma-std",
+        type=float,
+        default=6.0,
+        help="Minimum luma standard deviation required for a usable frame.",
+    )
+    parser.add_argument(
+        "--camera-min-dynamic-range",
+        type=float,
+        default=16.0,
+        help="Minimum p95-p5 luma range required for a usable frame.",
+    )
+    parser.add_argument(
+        "--camera-min-saturation",
+        type=float,
+        default=3.0,
+        help="Minimum average HSV saturation for non-flat camera frames.",
+    )
     parser.add_argument(
         "--gaze-affine_coeffs",
         type=str,
