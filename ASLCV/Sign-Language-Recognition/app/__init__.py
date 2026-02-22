@@ -1,4 +1,2 @@
-# app/__init__.py
+"""ASL app package."""
 
-from .frame_utils import *
-from .frame import *

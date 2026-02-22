@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, screen } from "electron";
+import { app, BrowserWindow, ipcMain, screen, globalShortcut } from "electron";
 import path from "path";
 import fs from "fs";
 import { spawn } from "child_process";
@@ -8,6 +8,298 @@ let win: BrowserWindow | null = null;
 let currentMode: 'full' | 'overlay' = 'full';
 let isToggling = false;
 let cvBackendPid: number | null = null;
+const SYSTEM_TARGET_TIMEOUT_MS = 700;
+const SNAP_GLOBAL_SHORTCUT = "CommandOrControl+Shift+G";
+const SNAP_TARGET_COOLDOWN_MS = 520;
+
+let lastSnappedTargetId: string | null = null;
+let lastSnappedTargetAt = 0;
+
+type SystemSnapTarget = {
+  id: string;
+  kind: string;
+  label: string;
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+};
+
+type SystemSnapTargetsResponse = {
+  ok: boolean;
+  provider: string;
+  reason?: string;
+  targets: SystemSnapTarget[];
+};
+
+type SnapCommitResponse = {
+  ok: boolean;
+  message: string;
+  target?: {
+    id: string;
+    x: number;
+    y: number;
+  };
+};
+
+async function moveCursorToScreenPoint(x: number, y: number): Promise<boolean> {
+  if (process.platform !== "darwin") {
+    return false;
+  }
+  const clampedX = Number.isFinite(x) ? Math.max(0, x) : 0;
+  const clampedY = Number.isFinite(y) ? Math.max(0, y) : 0;
+  const script = `
+import ctypes
+import sys
+
+class CGPoint(ctypes.Structure):
+    _fields_ = [("x", ctypes.c_double), ("y", ctypes.c_double)]
+
+target_x = float(sys.argv[1])
+target_y = float(sys.argv[2])
+api = ctypes.CDLL("/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices")
+result = api.CGWarpMouseCursorPosition(CGPoint(target_x, target_y))
+api.CGAssociateMouseAndMouseCursorPosition(True)
+sys.exit(0 if result == 0 else 1)
+`;
+
+  return await new Promise(resolve => {
+    const child = spawn("python3", ["-c", script, String(clampedX), String(clampedY)], {
+      stdio: ["ignore", "ignore", "ignore"],
+    });
+    child.once("error", () => resolve(false));
+    child.once("close", code => resolve(code === 0));
+  });
+}
+
+async function commitNearestSystemSnapTarget(): Promise<SnapCommitResponse> {
+  const cursor = screen.getCursorScreenPoint();
+  const response = await listSystemSnapTargets();
+  if (!response.ok) {
+    const reason = response.reason ? ` (${response.reason})` : "";
+    return {
+      ok: false,
+      message: `System target discovery unavailable${reason}. Grant Accessibility permissions.`,
+    };
+  }
+  if (!response.targets.length) {
+    return {
+      ok: false,
+      message: "No snap targets found in the frontmost app window.",
+    };
+  }
+
+  const now = Date.now();
+  const ranked = response.targets
+    .map(target => {
+      const cx = target.left + target.width * 0.5;
+      const cy = target.top + target.height * 0.5;
+      const d = Math.hypot(cx - cursor.x, cy - cursor.y);
+      let score = d;
+      if (target.id === lastSnappedTargetId) {
+        const cooldownLeft = Math.max(0, SNAP_TARGET_COOLDOWN_MS - (now - lastSnappedTargetAt));
+        score += cooldownLeft > 0 ? 120 : 18;
+      }
+      return { target, cx, cy, score };
+    })
+    .sort((a, b) => a.score - b.score);
+
+  const best = ranked[0];
+  if (!best) {
+    return {
+      ok: false,
+      message: "No ranked snap target available.",
+    };
+  }
+
+  const moved = await moveCursorToScreenPoint(best.cx, best.cy);
+  if (!moved) {
+    return {
+      ok: false,
+      message: "Failed to move system cursor. Verify OS permissions.",
+    };
+  }
+
+  lastSnappedTargetId = best.target.id;
+  lastSnappedTargetAt = now;
+  return {
+    ok: true,
+    message: `Snapped to ${best.target.label}`,
+    target: {
+      id: best.target.id,
+      x: best.cx,
+      y: best.cy,
+    },
+  };
+}
+
+function parseSystemTargetLines(raw: string): SystemSnapTarget[] {
+  const lines = raw
+    .split(/\r?\n/)
+    .map(line => line.trim())
+    .filter(Boolean);
+  const targets: SystemSnapTarget[] = [];
+  let seq = 0;
+  for (const line of lines) {
+    const parts = line.split("\t");
+    if (parts.length < 6) {
+      continue;
+    }
+    const kind = parts[0]?.trim().toLowerCase() || "control";
+    const label = parts[1]?.trim() || kind;
+    const left = Number(parts[2]);
+    const top = Number(parts[3]);
+    const width = Number(parts[4]);
+    const height = Number(parts[5]);
+    if (
+      !Number.isFinite(left)
+      || !Number.isFinite(top)
+      || !Number.isFinite(width)
+      || !Number.isFinite(height)
+      || width < 8
+      || height < 8
+    ) {
+      continue;
+    }
+    seq += 1;
+    targets.push({
+      id: `${kind}-${seq}`,
+      kind,
+      label,
+      left,
+      top,
+      width,
+      height,
+    });
+  }
+  return targets;
+}
+
+async function listSystemSnapTargets(): Promise<SystemSnapTargetsResponse> {
+  if (process.platform !== "darwin") {
+    return {
+      ok: false,
+      provider: "system-events",
+      reason: "unsupported-platform",
+      targets: [],
+    };
+  }
+
+  const script = `
+set outLines to {}
+tell application "System Events"
+  if UI elements enabled is false then
+    return "__ERROR__\\tAX_DISABLED"
+  end if
+  try
+    set frontProc to first application process whose frontmost is true
+    set frontWin to front window of frontProc
+  on error
+    return "__ERROR__\\tNO_FRONT_WINDOW"
+  end try
+
+  repeat with btn in (buttons of frontWin)
+    try
+      set p to position of btn
+      set s to size of btn
+      set end of outLines to ("button\\tbutton\\t" & (item 1 of p) & "\\t" & (item 2 of p) & "\\t" & (item 1 of s) & "\\t" & (item 2 of s))
+    end try
+  end repeat
+
+  repeat with txt in (text fields of frontWin)
+    try
+      set p to position of txt
+      set s to size of txt
+      set end of outLines to ("text_field\\tinput\\t" & (item 1 of p) & "\\t" & (item 2 of p) & "\\t" & (item 1 of s) & "\\t" & (item 2 of s))
+    end try
+  end repeat
+
+  repeat with cb in (checkboxes of frontWin)
+    try
+      set p to position of cb
+      set s to size of cb
+      set end of outLines to ("checkbox\\tcheckbox\\t" & (item 1 of p) & "\\t" & (item 2 of p) & "\\t" & (item 1 of s) & "\\t" & (item 2 of s))
+    end try
+  end repeat
+end tell
+set AppleScript's text item delimiters to linefeed
+return outLines as text
+`;
+
+  return new Promise(resolve => {
+    let stdout = "";
+    let stderr = "";
+    const child = spawn("osascript", ["-e", script], { stdio: ["ignore", "pipe", "pipe"] });
+    const timeout = setTimeout(() => {
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        // no-op
+      }
+      resolve({
+        ok: false,
+        provider: "system-events",
+        reason: "timeout",
+        targets: [],
+      });
+    }, SYSTEM_TARGET_TIMEOUT_MS);
+
+    child.stdout.on("data", chunk => {
+      stdout += chunk.toString();
+    });
+    child.stderr.on("data", chunk => {
+      stderr += chunk.toString();
+    });
+
+    child.on("error", error => {
+      clearTimeout(timeout);
+      resolve({
+        ok: false,
+        provider: "system-events",
+        reason: `spawn-error:${error.message}`,
+        targets: [],
+      });
+    });
+
+    child.on("close", code => {
+      clearTimeout(timeout);
+      if (code !== 0) {
+        resolve({
+          ok: false,
+          provider: "system-events",
+          reason: `osascript-exit:${code}:${stderr.trim()}`,
+          targets: [],
+        });
+        return;
+      }
+      const text = stdout.trim();
+      if (!text) {
+        resolve({
+          ok: true,
+          provider: "system-events",
+          reason: "empty",
+          targets: [],
+        });
+        return;
+      }
+      if (text.startsWith("__ERROR__")) {
+        const reason = text.split("\t")[1] || "unknown";
+        resolve({
+          ok: false,
+          provider: "system-events",
+          reason,
+          targets: [],
+        });
+        return;
+      }
+      resolve({
+        ok: true,
+        provider: "system-events",
+        targets: parseSystemTargetLines(text),
+      });
+    });
+  });
+}
 
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -373,8 +665,48 @@ ipcMain.handle("cv:stop-backend", () => {
   return stopCvBackend({ force: true, reason: "ipc" });
 });
 
+ipcMain.handle("cv:is-backend-running", async () => {
+  try {
+    return await probeTcp("127.0.0.1", 8767, 350);
+  } catch {
+    return false;
+  }
+});
+
+ipcMain.handle("snap:move-cursor", async (_event, args?: { x?: number; y?: number }) => {
+  const x = Number(args?.x);
+  const y = Number(args?.y);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) {
+    return { ok: false, message: "Invalid cursor coordinates." };
+  }
+  const moved = await moveCursorToScreenPoint(x, y);
+  if (!moved) {
+    return { ok: false, message: "Failed to move system cursor." };
+  }
+  return { ok: true, message: "Cursor moved." };
+});
+
+ipcMain.handle("snap:commit-nearest", async () => {
+  return await commitNearestSystemSnapTarget();
+});
+
+ipcMain.handle("snap:get-cursor-screen-point", () => {
+  return screen.getCursorScreenPoint();
+});
+
+ipcMain.handle("snap:list-system-targets", async () => {
+  return await listSystemSnapTargets();
+});
+
 app.whenReady().then(() => {
   createWindow('full');
+
+  const snapShortcutRegistered = globalShortcut.register(SNAP_GLOBAL_SHORTCUT, () => {
+    void commitNearestSystemSnapTarget();
+  });
+  if (!snapShortcutRegistered) {
+    console.warn(`Failed to register global snap shortcut: ${SNAP_GLOBAL_SHORTCUT}`);
+  }
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -395,5 +727,6 @@ app.on('window-all-closed', () => {
 });
 
 app.on("before-quit", () => {
+  globalShortcut.unregisterAll();
   stopCvBackend({ force: true, reason: "before-quit" });
 });

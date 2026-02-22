@@ -28,7 +28,7 @@ joblib==1.5.3
 #kiwisolver @ file:///C:/miniconda3/conda-bld/kiwisolver_1764159353779/work
 MarkupSafe==3.0.2
 matplotlib==3.10.8
-mediapipe==0.10.9
+mediapipe==0.10.32
 mkl-service==2.4.0
 #mkl_fft @ file:///C:/Users/dev-admin/mkl/mkl_fft_1730823082242/work
 #mkl_random @ file:///C:/Users/dev-admin/mkl/mkl_random_1730822522280/work
@@ -41,7 +41,7 @@ opencv-python==4.13.0.90
 #packaging @ file:///C:/miniconda3/conda-bld/packaging_1761049101700/work
 pandas==2.3.3
 pillow==12.1.0
-protobuf==3.20.3
+protobuf>=4.25.3,<5
 pycparser==3.0
 pynput>=1.7
 pydantic==2.12.5

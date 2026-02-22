@@ -36,6 +36,9 @@ from datetime import datetime
 import subprocess
 import shutil
 
+# Force CPU path for MediaPipe to avoid OpenGL context failures in headless setups.
+os.environ.setdefault("MEDIAPIPE_DISABLE_GPU", "1")
+
 import torch
 import numpy as np
 import mediapipe as mp

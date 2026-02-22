@@ -71,9 +71,10 @@ class CustomCNN(nn.Module):
 
 
 class CustomMobileNetV2(nn.Module):
-    def __init__(self, num_classes):
+    def __init__(self, num_classes, pretrained=True):
         super(CustomMobileNetV2, self).__init__()
-        self.base_model = mobilenet_v2(weights=MobileNet_V2_Weights.DEFAULT)
+        weights = MobileNet_V2_Weights.DEFAULT if pretrained else None
+        self.base_model = mobilenet_v2(weights=weights)
 
         # Define attention layers for intermediate and final channel sizes
         self.attention1 = ChannelAttention(32)   # After the first block (32 channels)
@@ -120,9 +121,10 @@ class CustomMobileNetV2(nn.Module):
 
 
 class CustomResNet18(nn.Module):
-    def __init__(self, num_classes):
+    def __init__(self, num_classes, pretrained=True):
         super(CustomResNet18, self).__init__()
-        self.base_model = resnet18(weights=ResNet18_Weights.DEFAULT)
+        weights = ResNet18_Weights.DEFAULT if pretrained else None
+        self.base_model = resnet18(weights=weights)
 
         # Add channel attention only after specific layers
         self.attention1 = ChannelAttention(64)     # After initial conv layer

@@ -1,9 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import ReactDOM from 'react-dom/client';
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { ThemeProvider } from './context/ThemeContext';
 import Shell from './ui/shell';
 import OverlayBar from './ui/overlay';
+import SnapCursorLayer from './ui/snapCursorLayer';
 import Onboarding from './routes/onboarding';
 import Home from './routes/home';
 import Visuals from './routes/visuals';
@@ -27,6 +28,14 @@ const ProtectedRoute: React.FC<{ children: React.ReactNode }> = ({ children }) =
 };
 
 // Root component that handles routing (full window only)
+const SnapCursorRoot: React.FC = () => {
+  const location = useLocation();
+  if (location.pathname.startsWith('/onboarding')) {
+    return null;
+  }
+  return <SnapCursorLayer />;
+};
+
 const App: React.FC = () => {
   return (
     <ThemeProvider>
@@ -56,6 +65,7 @@ const App: React.FC = () => {
           <Route path="/" element={<Navigate to="/onboarding" replace />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
+        <SnapCursorRoot />
       </BrowserRouter>
     </ThemeProvider>
   );

@@ -10,8 +10,8 @@ data/compressed_asl*.npz
 demo*
 data/backup/
 compressor/__pycache__/
-
+.env
 # Raw Downlaods
 raw_downloads/
 
-   .venv/
+.venv/

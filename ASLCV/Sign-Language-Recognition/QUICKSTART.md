@@ -16,10 +16,20 @@ conda activate asl-deployment
 **Option B – Linux / macOS (venv + pip):**
 
 ```bash
-python3 -m venv .venv
+# Prefer Python 3.12 for best wheel compatibility
+python3.12 -m venv .venv
+# Fallback if 3.12 is unavailable:
+# python3 -m venv .venv
 source .venv/bin/activate   # Linux/macOS
-pip install -r requirements_linux.txt
+
+# macOS
+pip install -r requirements_mac.txt
+
+# Linux
+# pip install -r requirements_linux.txt
 ```
+
+Do not use `requirements.txt` on macOS/Linux. Use the OS-specific requirements file above.
 
 ### 2. Model weights
 
@@ -91,6 +101,7 @@ Then open:
 
 ## Requirements
 
-- Python 3.10+
+- Python 3.10-3.13 (3.12 recommended)
+- Python 3.14 may trigger source builds for scientific deps on some setups
 - Webcam
 - CUDA GPU (optional, for faster inference)

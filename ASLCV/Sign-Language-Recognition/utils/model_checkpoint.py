@@ -27,7 +27,8 @@ def load_checkpoint(filepath, model, optimizer, device):
 
 def load_model(filepath, device):
     num_classes = len(string.ascii_uppercase)
-    model = CustomMobileNetV2(num_classes)
+    # Inference should not depend on network/cache availability.
+    model = CustomMobileNetV2(num_classes, pretrained=False)
     state_dict = torch.load(filepath, weights_only=True, map_location=device)
     model.load_state_dict(state_dict)
     model.to(device)

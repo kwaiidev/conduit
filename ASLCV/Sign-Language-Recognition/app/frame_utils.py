@@ -2,6 +2,11 @@
 
 import cv2
 import time
+import os
+
+# Force CPU path for MediaPipe to avoid OpenGL context failures in headless setups.
+os.environ.setdefault("MEDIAPIPE_DISABLE_GPU", "1")
+
 import mediapipe as mp
 from utils import *
 

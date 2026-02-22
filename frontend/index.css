@@ -79,6 +79,12 @@ body {
   overflow: hidden; /* keep if you want app-like shell; remove if you want page scroll */
 }
 
+html.snap-cursor-active,
+html.snap-cursor-active body,
+html.snap-cursor-active * {
+  cursor: none !important;
+}
+
 /* App root layout */
 #root {
   display: flex;
