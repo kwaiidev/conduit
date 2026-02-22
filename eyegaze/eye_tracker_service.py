@@ -290,7 +290,34 @@ class EyeTrackerService:
             except Exception:
                 continue
 
-    def _open_camera_capture(self, camera_index: int) -> Optional[Any]:
+    def _open_camera_capture(self, camera_index) -> Optional[Any]:
+        # If a broker URL is passed, open it directly — no backend iteration needed.
+        if isinstance(camera_index, str) and (
+            camera_index.startswith("http://")
+            or camera_index.startswith("rtsp://")
+            or camera_index.startswith("https://")
+        ):
+            self._startup_log(f"camera_open_attempt url={camera_index}", force=True)
+            try:
+                cap = cv2.VideoCapture(camera_index)
+            except Exception:
+                cap = None
+            if cap is not None and cap.isOpened():
+                self._camera_backend = "url"
+                self._startup_log(f"camera_open_success url={camera_index}", force=True)
+                return cap
+            self._startup_log(f"camera_open_failed url={camera_index} — falling back to camera 0", force=True)
+            # Fall back to direct camera index 0
+            camera_index = 0
+
+        # Convert string digit ("0", "1") to int
+        if isinstance(camera_index, str):
+            try:
+                camera_index = int(camera_index)
+            except ValueError:
+                self._startup_log(f"camera_open_failed invalid camera arg={camera_index!r}", force=True)
+                return None
+
         for backend_name, backend_id in self._camera_capture_candidates():
             self._startup_log(
                 f"camera_open_attempt index={camera_index} backend={backend_name}",
@@ -2693,7 +2720,11 @@ class EyeTrackerService:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run Cerebro eye tracking service")
-    parser.add_argument("--camera", type=int, default=0, help="camera index")
+    parser.add_argument(
+        "--camera",
+        default="0",
+        help="camera index (int) or broker URL e.g. http://localhost:9001/stream",
+    )
     parser.add_argument("--host", type=str, default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--http-enabled", action=argparse.BooleanOptionalAction, default=True)

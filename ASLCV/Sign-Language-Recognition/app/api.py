@@ -55,6 +55,34 @@ from app.frame_utils import extract_hand_features_mask, draw_hand_features
 
 
 # ---------------------------------------------------------------------------
+# Camera broker config
+# ---------------------------------------------------------------------------
+
+# If the shared camera broker is running, both ASLCV and eyegaze can use the
+# same physical webcam without device conflicts.
+CAMERA_BROKER_URL = os.environ.get("CAMERA_BROKER_URL", "http://localhost:9001/stream")
+
+
+def _open_camera() -> cv2.VideoCapture:
+    """Try the shared broker first; fall back to direct VideoCapture(0)."""
+    cap = cv2.VideoCapture(CAMERA_BROKER_URL)
+    if cap.isOpened():
+        print(f"[ASL] Using shared camera broker: {CAMERA_BROKER_URL}")
+        return cap
+    print("[ASL] Broker unavailable — falling back to direct camera 0")
+    cap = cv2.VideoCapture(0)
+    if not cap.isOpened():
+        raise RuntimeError("Could not open webcam or broker")
+    # Only set these properties for direct capture (not URL streams)
+    try:
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        cap.set(cv2.CAP_PROP_FPS, 30)
+    except Exception:
+        pass
+    return cap
+
+
+# ---------------------------------------------------------------------------
 # Port discovery
 # ---------------------------------------------------------------------------
 
@@ -176,7 +204,7 @@ class ASLDetector:
         if self.running:
             return
         print(f"[{self._timestamp()}] Opening webcam...")
-        self.cap = cv2.VideoCapture(0)
+        self.cap = _open_camera()
         if not self.cap.isOpened():
             raise RuntimeError("Could not open webcam")
         self.running = True
