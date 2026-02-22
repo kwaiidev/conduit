@@ -10,6 +10,7 @@ import {
   Maximize2,
   Hand,
 } from "lucide-react";
+import { enableASL, disableASL, getASLReady } from "../lib/aslcv";
 
 export default function OverlayBar() {
   const [signalStrength] = useState(98);
@@ -19,7 +20,27 @@ export default function OverlayBar() {
   const [voiceOn, setVoiceOn] = useState(false);
   const [opticOpen, setOpticOpen] = useState(false);
   const [aslOn, setAslOn] = useState(false);
-  
+
+  // Sync ASL toggle with real API state on mount
+  useEffect(() => {
+    getASLReady().then(setAslOn);
+  }, []);
+
+  const toggleASL = async () => {
+    const next = !aslOn;
+    setAslOn(next);
+    try {
+      if (next) {
+        await enableASL();
+      } else {
+        await disableASL();
+      }
+    } catch (e) {
+      console.error("ASL toggle failed:", e);
+      setAslOn(!next); // revert on failure
+    }
+  };
+
 
   // Simulate jaw signals for demo (hum on/off soft pink). Replace with real EEG/sensor data.
   useEffect(() => {
@@ -112,7 +133,7 @@ export default function OverlayBar() {
 {/* ASL to Text toggle */}
 <button
   type="button"
-  onClick={() => setAslOn((a) => !a)}
+  onClick={toggleASL}
   style={styles.iconButton}
   title={aslOn ? "ASL to Text enabled" : "Enable ASL to Text"}
 >

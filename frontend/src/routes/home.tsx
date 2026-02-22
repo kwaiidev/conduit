@@ -1,5 +1,6 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
+import { enableASL, disableASL, getASLReady } from "../lib/aslcv";
 import { motion } from "motion/react";
 import { 
   MousePointer2, 
@@ -32,6 +33,17 @@ export default function Home() {
   const nav = useNavigate();
   const [activeModes, setActiveModes] = useState(['cv-pointer', 'eeg-select']);
 
+  // Sync sign-text toggle with real API state on mount
+  useEffect(() => {
+    getASLReady().then((ready) => {
+      setActiveModes((prev) =>
+        ready
+          ? prev.includes('sign-text') ? prev : [...prev, 'sign-text']
+          : prev.filter((id) => id !== 'sign-text')
+      );
+    });
+  }, []);
+
   const featureGroups = [
     {
       title: "Pointer Control",
@@ -58,12 +70,30 @@ export default function Home() {
     nav("/onboarding", { state: { startStep: 1 } });
   };
 
-  const toggleFeature = (featureId: string) => {
-    setActiveModes(prev => 
-      prev.includes(featureId) 
-        ? prev.filter(id => id !== featureId)
-        : [...prev, featureId]
+  const toggleFeature = async (featureId: string) => {
+    const isCurrentlyActive = activeModes.includes(featureId);
+    const next = !isCurrentlyActive;
+
+    // Optimistically update UI
+    setActiveModes((prev) =>
+      next ? [...prev, featureId] : prev.filter((id) => id !== featureId)
     );
+
+    if (featureId === 'sign-text') {
+      try {
+        if (next) {
+          await enableASL();
+        } else {
+          await disableASL();
+        }
+      } catch (e) {
+        console.error("ASL toggle failed:", e);
+        // Revert on failure
+        setActiveModes((prev) =>
+          isCurrentlyActive ? [...prev, featureId] : prev.filter((id) => id !== featureId)
+        );
+      }
+    }
   };
 
   return (

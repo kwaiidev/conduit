@@ -1,7 +1,7 @@
-import React, { useMemo } from "react";
+import React, { useMemo, useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { motion } from "motion/react";
-import { ArrowLeft, Zap, Waves, Grid3X3 } from "lucide-react";
+import { ArrowLeft, Zap, Waves, Grid3X3, Camera } from "lucide-react";
 
 const containerVariants = {
   hidden: { opacity: 0 },
@@ -321,16 +321,17 @@ export default function Visualizations() {
         </motion.div>
       </motion.section>
 
-      {/* Camera preview placeholder */}
+      {/* Camera preview — live ASLCV MJPEG feed */}
       <motion.section style={styles.cameraPanelSection} variants={itemVariants}>
         <motion.div style={styles.panel} variants={itemVariants}>
           <PanelHeader
-            icon={<Waves size={18} />}
+            icon={<Camera size={18} />}
             title="Live Camera Preview"
-            description="Eye tracking + ASL tracking (placeholder)"
+            description="ASL hand sign detection feed"
+            rightSlot={<ASLStatusPill />}
           />
           <div style={styles.panelBody}>
-            <PlaceholderCanvas label="Camera feed / CV overlay goes here" />
+            <ASLFeed />
           </div>
         </motion.div>
       </motion.section>
@@ -392,6 +393,81 @@ function PlaceholderCanvas({ label }: { label: string }) {
       <div style={styles.placeholderInner}>
         <div style={styles.placeholderText}>{label}</div>
       </div>
+    </div>
+  );
+}
+
+const ASL_VIDEO_URL = "http://localhost:8765/video";
+const ASL_STATUS_URL = "http://localhost:8765/";
+
+function ASLFeed() {
+  const [error, setError] = useState(false);
+
+  return (
+    <div style={styles.placeholderOuter}>
+      {error ? (
+        <div style={styles.placeholderInner}>
+          <div style={styles.placeholderText}>ASLCV server offline — start python -m app.api</div>
+        </div>
+      ) : (
+        <img
+          src={ASL_VIDEO_URL}
+          alt="ASL live feed"
+          onError={() => setError(true)}
+          style={{
+            width: "100%",
+            height: "100%",
+            minHeight: 420,
+            objectFit: "cover",
+            borderRadius: 14,
+            display: "block",
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+function ASLStatusPill() {
+  const [ready, setReady] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const check = async () => {
+      try {
+        const res = await fetch(ASL_STATUS_URL, { signal: AbortSignal.timeout(1500) });
+        const data = await res.json();
+        if (!cancelled) setReady(Boolean(data.detection_ready));
+      } catch {
+        if (!cancelled) setReady(false);
+      }
+    };
+
+    check();
+    const interval = setInterval(check, 3000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, []);
+
+  if (ready === null) return null;
+
+  return (
+    <div
+      style={{
+        fontSize: 12,
+        fontWeight: 900,
+        padding: "8px 10px",
+        borderRadius: 999,
+        whiteSpace: "nowrap" as const,
+        color: ready ? "#22c55e" : "#9ca3af",
+        background: ready ? "rgba(34,197,94,0.1)" : "rgba(156,163,175,0.1)",
+        border: `1px solid ${ready ? "rgba(34,197,94,0.25)" : "rgba(156,163,175,0.2)"}`,
+      }}
+    >
+      {ready ? "● LIVE" : "○ OFFLINE"}
     </div>
   );
 }
