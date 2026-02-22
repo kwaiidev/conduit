@@ -32,6 +32,7 @@ declare global {
       startCvBackend: (args?: { camera?: number }) => Promise<{ ok: boolean; message: string }>;
       stopCvBackend: () => Promise<{ ok: boolean; message: string }>;
       isCvBackendRunning: () => Promise<boolean>;
+      getCvStatusUrl: () => Promise<string>;
       startVoiceBackend: () => Promise<{ ok: boolean; message: string }>;
       stopVoiceBackend: () => Promise<{ ok: boolean; message: string }>;
       isVoiceBackendRunning: () => Promise<boolean>;

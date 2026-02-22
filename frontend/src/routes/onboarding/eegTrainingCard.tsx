@@ -1,19 +1,41 @@
 import React from "react";
 import { motion } from "motion/react";
 import { disableEEG, enableEEG } from "../../lib/eeg";
+import { useTheme } from "../../context/ThemeContext";
+import leftDark from "../../assets/leftDark.gif";
+import leftLight from "../../assets/leftLight.gif";
+import rightDark from "../../assets/rightDark.gif";
+import rightLight from "../../assets/rightLight.gif";
 
 type EegTrainingCardProps = {
   instruction: string;
+  cue?: "left" | "right";
 };
 
-export function EegTrainingCard({ instruction }: EegTrainingCardProps) {
+const CUE_ASSETS = {
+  left: {
+    light: leftLight,
+    dark: leftDark,
+    alt: "Left jaw clench EEG cue",
+  },
+  right: {
+    light: rightLight,
+    dark: rightDark,
+    alt: "Right jaw clench EEG cue",
+  },
+} as const;
+
+export function EegTrainingCard({ instruction, cue }: EegTrainingCardProps) {
+  const { isDark } = useTheme();
   const [isTraining, setIsTraining] = React.useState(false);
   const [isStarting, setIsStarting] = React.useState(false);
   const [statusMessage, setStatusMessage] = React.useState("Press Start to launch EEG service and begin.");
+  const cueAsset = cue ? (isDark ? CUE_ASSETS[cue].dark : CUE_ASSETS[cue].light) : null;
+  const cueAlt = cue ? CUE_ASSETS[cue].alt : "";
 
   const startTraining = React.useCallback(async () => {
     setIsStarting(true);
-    setStatusMessage("Launching EEG backend...");
+    setStatusMessage("Launching EEG backend and waiting for stream confirmation...");
     try {
       const launchResult = await window.electron.startEegBackend();
       if (!launchResult.ok) {
@@ -49,8 +71,23 @@ export function EegTrainingCard({ instruction }: EegTrainingCardProps) {
       </div>
 
       <div style={styles.gifCard}>
-        <div style={styles.gifInner}>
-          <div style={styles.gifText}>EEG Training Cue</div>
+        {cueAsset ? (
+          <div style={styles.gifInner}>
+            <img src={cueAsset} alt={cueAlt} style={styles.gifImage} />
+          </div>
+        ) : null}
+
+        <div style={styles.feedGrid}>
+          <img
+            src="http://localhost:8770/waves"
+            alt="EEG waves calibration feed"
+            style={styles.feedImage}
+          />
+          <img
+            src="http://localhost:8770/topo"
+            alt="EEG topomap calibration feed"
+            style={styles.feedImage}
+          />
         </div>
       </div>
 
@@ -89,7 +126,7 @@ export function EegTrainingCard({ instruction }: EegTrainingCardProps) {
 
 const BUTTON_WIDTH = 180;
 const BUTTON_HEIGHT = 42;
-const GIF_WIDTH = 420;
+const CARD_MAX_WIDTH = 500;
 
 const styles: Record<string, React.CSSProperties> = {
   container: {
@@ -101,7 +138,8 @@ const styles: Record<string, React.CSSProperties> = {
   },
 
   headerBlock: {
-    width: GIF_WIDTH,
+    width: "100%",
+    maxWidth: CARD_MAX_WIDTH,
     textAlign: "center",
   },
 
@@ -118,20 +156,41 @@ const styles: Record<string, React.CSSProperties> = {
   },
 
   gifCard: {
-    width: GIF_WIDTH,
+    width: "100%",
+    maxWidth: CARD_MAX_WIDTH,
     borderRadius: 20,
-    border: "1px solid var(--border)",
+    border: "1px solid var(--pink-border)",
     background: "var(--bg-secondary)",
     padding: 16,
+    display: "grid",
+    gap: 12,
+  },
+
+  feedGrid: {
+    display: "grid",
+    gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
+    gap: 12,
+  },
+
+  feedImage: {
+    width: "100%",
+    height: 84,
+    borderRadius: 8,
+    border: "1px solid var(--border)",
+    background: "var(--bg-primary)",
+    objectFit: "cover",
+    overflow: "hidden",
   },
 
   gifInner: {
-    height: 240,
+    minHeight: 250,
     borderRadius: 16,
-    border: "1px dashed var(--border)",
-    background: "var(--bg-tertiary)",
+    border: "1px solid transparent",
+    background: "linear-gradient(180deg, rgba(255,45,141,0.12), rgba(255,45,141,0.04))",
     display: "grid",
     placeItems: "center",
+    padding: 8,
+    overflow: "hidden",
   },
 
   gifText: {
@@ -142,8 +201,19 @@ const styles: Record<string, React.CSSProperties> = {
     color: "var(--text-secondary)",
   },
 
+  gifImage: {
+    width: "88%",
+    height: "auto",
+    maxWidth: 360,
+    maxHeight: 220,
+    borderRadius: 12,
+    objectFit: "contain",
+    display: "block",
+  },
+
   buttonWrapper: {
-    width: GIF_WIDTH,
+    width: "100%",
+    maxWidth: CARD_MAX_WIDTH,
     display: "flex",
     justifyContent: "center",
   },

@@ -4,10 +4,10 @@ import { disableEEG, enableEEG } from "../../lib/eeg";
 export function EEGConnectStep() {
     const [isBooting, setIsBooting] = React.useState(false);
     const [isReady, setIsReady] = React.useState(false);
-    const [statusMessage, setStatusMessage] = React.useState("Press Start to launch the EEG backend terminal and connect your headset stream.");
+    const [statusMessage, setStatusMessage] = React.useState("Press Start to launch the Muse Bluetooth stream and wait for EEG tracking confirmation.");
     const startService = React.useCallback(async () => {
         setIsBooting(true);
-        setStatusMessage("Launching EEG backend...");
+        setStatusMessage("Starting Muse Bluetooth stream and waiting for EEG stream confirmation...");
         try {
             const launchResult = await window.electron.startEegBackend();
             if (!launchResult.ok) {
@@ -17,7 +17,7 @@ export function EEGConnectStep() {
             }
             await enableEEG();
             setIsReady(true);
-            setStatusMessage("EEG backend running. Ensure Muse LSL stream is active.");
+            setStatusMessage("EEG stream confirmed. Backend is active.");
         }
         catch (error) {
             const detail = error instanceof Error ? error.message : String(error);
@@ -47,7 +47,7 @@ export function EEGConnectStep() {
                     return;
                 }
                 setIsReady(true);
-                setStatusMessage("EEG backend already running. Continue to baseline calibration.");
+                setStatusMessage("EEG stream already confirmed. Continue to baseline calibration.");
             }
             catch {
                 // no-op
@@ -58,7 +58,7 @@ export function EEGConnectStep() {
             cancelled = true;
         };
     }, []);
-    return (_jsx("div", { style: styles.container, children: _jsxs("div", { style: styles.card, children: [_jsx("h3", { style: styles.title, children: "EEG Service" }), _jsx("p", { style: styles.description, children: "Start the EEG backend from onboarding, then keep your headset nearby and streaming." }), _jsx("p", { style: styles.status, children: statusMessage }), _jsx("div", { style: styles.controls, children: !isReady ? (_jsx("button", { type: "button", onClick: startService, style: {
+    return (_jsx("div", { style: styles.container, children: _jsxs("div", { style: styles.card, children: [_jsx("h3", { style: styles.title, children: "EEG Service" }), _jsx("p", { style: styles.description, children: "This step turns on Muse Bluetooth, waits for headset streaming, and then enables EEG tracking." }), _jsx("p", { style: styles.status, children: statusMessage }), _jsx("div", { style: styles.controls, children: !isReady ? (_jsx("button", { type: "button", onClick: startService, style: {
                             ...styles.startButton,
                             ...(isBooting ? styles.disabledButton : {}),
                         }, disabled: isBooting, children: isBooting ? "Starting..." : "Start" })) : (_jsx("button", { type: "button", onClick: pauseSession, style: styles.stopButton, children: "Pause" })) })] }) }));
@@ -98,6 +98,7 @@ const styles = {
     controls: {
         display: "flex",
         gap: 10,
+        justifyContent: "center",
     },
     startButton: {
         height: 40,

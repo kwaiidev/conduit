@@ -11,7 +11,7 @@ export default function Shell({ children }: { children: React.ReactNode }) {
       console.log("Initial overlay mode in Shell:", mode);
       setIsOverlay(mode);
     });
-    window.electron?.onOverlayModeChanged((mode) => {
+    window.electron?.onOverlayModeChanged?.((mode) => {
       console.log("Overlay mode changed in Shell:", mode);
       setIsOverlay(mode);
     });

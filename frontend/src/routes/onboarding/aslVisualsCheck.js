@@ -2,6 +2,13 @@ import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
 import React from "react";
 import { enableASL, getASLReady } from "../../lib/aslcv";
 const ASL_VIDEO_URL = "http://localhost:8765/video";
+const SIGN_TEXT_PREFERENCE_KEY = "conduit-modality-intent-sign-text";
+function setModalityPreference(enabled) {
+    if (typeof window === "undefined" || !window.localStorage) {
+        return;
+    }
+    localStorage.setItem(SIGN_TEXT_PREFERENCE_KEY, enabled ? "1" : "0");
+}
 function describeHealth(health) {
     if (!health.signBackend) {
         return "Sign backend is offline. Start ASL service to test visuals.";
@@ -28,7 +35,6 @@ export function ASLVisualsCheckStep() {
     const [isStartingCv, setIsStartingCv] = React.useState(false);
     const [videoError, setVideoError] = React.useState(false);
     const [videoNonce, setVideoNonce] = React.useState(() => Date.now());
-    const autoEnableAttemptedRef = React.useRef(false);
     const probeStatus = React.useCallback(async (silent = false) => {
         const [signBackend, cvBackend] = await Promise.all([
             window.electron.isSignBackendRunning(),
@@ -37,20 +43,6 @@ export function ASLVisualsCheckStep() {
         let aslReady = false;
         if (signBackend) {
             aslReady = await getASLReady();
-            if (!aslReady && !autoEnableAttemptedRef.current) {
-                autoEnableAttemptedRef.current = true;
-                try {
-                    await enableASL();
-                    await sleep(250);
-                    aslReady = await getASLReady();
-                }
-                catch {
-                    // Keep probing; startup path surfaces actionable errors.
-                }
-            }
-        }
-        else {
-            autoEnableAttemptedRef.current = false;
         }
         const nextHealth = { signBackend, aslReady, cvBackend };
         setHealth(nextHealth);
@@ -70,7 +62,6 @@ export function ASLVisualsCheckStep() {
             }
             setStatusMessage("Enabling ASL detection and session...");
             await enableASL();
-            autoEnableAttemptedRef.current = true;
             const deadline = Date.now() + 12000;
             let ready = false;
             while (Date.now() < deadline) {
@@ -80,6 +71,7 @@ export function ASLVisualsCheckStep() {
                 }
                 await sleep(400);
             }
+            setModalityPreference(ready);
             const nextHealth = await probeStatus(true);
             if (ready && nextHealth.cvBackend) {
                 setStatusMessage("ASL and eye-gaze CV are both active. Open Visualizations to confirm live feed.");
@@ -96,6 +88,7 @@ export function ASLVisualsCheckStep() {
         catch (error) {
             const detail = error instanceof Error ? error.message : String(error);
             setStatusMessage(`ASL startup failed: ${detail}`);
+            setModalityPreference(false);
         }
         finally {
             setIsStartingAsl(false);
@@ -144,7 +137,7 @@ export function ASLVisualsCheckStep() {
         setVideoError(false);
         setVideoNonce(Date.now());
     }, [health.signBackend]);
-    return (_jsx("div", { style: styles.container, children: _jsxs("div", { style: styles.card, children: [_jsx("h3", { style: styles.title, children: "ASL + Eye-Gaze Validation" }), _jsx("p", { style: styles.description, children: "This step starts the sign backend, enables ASL inference, and checks whether eye-gaze CV is online too." }), _jsxs("p", { style: styles.description, children: ["ASL activation sends ", _jsx("code", { children: "POST /changestate?state=1" }), " and ", _jsx("code", { children: "POST /sessionstate?state=1" }), "."] }), _jsxs("div", { style: styles.badgeRow, children: [_jsx(StatusBadge, { label: "Sign Backend", online: health.signBackend }), _jsx(StatusBadge, { label: "ASL Detection", online: health.aslReady }), _jsx(StatusBadge, { label: "CV Backend", online: health.cvBackend })] }), _jsxs("div", { style: styles.buttonRow, children: [_jsx("button", { type: "button", onClick: startAslService, style: {
+    return (_jsx("div", { style: styles.container, children: _jsxs("div", { style: styles.card, children: [_jsx("h3", { style: styles.title, children: "ASL + Eye-Gaze Validation" }), _jsx("p", { style: styles.description, children: "This step starts the sign backend, enables ASL inference, and checks whether eye-gaze CV is online too." }), _jsxs("div", { style: styles.badgeRow, children: [_jsx(StatusBadge, { label: "Sign Backend", online: health.signBackend }), _jsx(StatusBadge, { label: "ASL Detection", online: health.aslReady }), _jsx(StatusBadge, { label: "CV Backend", online: health.cvBackend })] }), _jsxs("div", { style: styles.buttonRow, children: [_jsx("button", { type: "button", onClick: startAslService, style: {
                                 ...styles.button,
                                 ...(isStartingAsl ? styles.buttonDisabled : {}),
                             }, disabled: isStartingAsl, children: isStartingAsl ? "Starting ASL..." : "Start ASL Service" }), _jsx("button", { type: "button", onClick: startCvService, style: {
@@ -169,14 +162,15 @@ const styles = {
         width: "100%",
     },
     card: {
-        width: 620,
-        borderRadius: 20,
+        width: "100%",
+        maxWidth: 520,
+        borderRadius: 18,
         border: "1px solid var(--border)",
         background: "var(--bg-secondary)",
-        padding: 20,
+        padding: 18,
         display: "flex",
         flexDirection: "column",
-        gap: 12,
+        gap: 10,
     },
     title: {
         margin: 0,
@@ -246,14 +240,14 @@ const styles = {
         border: "1px solid var(--border)",
         background: "var(--bg-tertiary)",
         overflow: "hidden",
-        minHeight: 240,
+        minHeight: 184,
         display: "grid",
         placeItems: "center",
     },
     previewImage: {
         width: "100%",
         height: "100%",
-        minHeight: 240,
+        minHeight: 184,
         objectFit: "cover",
         display: "block",
     },

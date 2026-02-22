@@ -2,13 +2,33 @@ import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
 import React from "react";
 import { motion } from "motion/react";
 import { disableEEG, enableEEG } from "../../lib/eeg";
-export function EegTrainingCard({ instruction }) {
+import { useTheme } from "../../context/ThemeContext";
+import leftDark from "../../assets/leftDark.gif";
+import leftLight from "../../assets/leftLight.gif";
+import rightDark from "../../assets/rightDark.gif";
+import rightLight from "../../assets/rightLight.gif";
+const CUE_ASSETS = {
+    left: {
+        light: leftLight,
+        dark: leftDark,
+        alt: "Left jaw clench EEG cue",
+    },
+    right: {
+        light: rightLight,
+        dark: rightDark,
+        alt: "Right jaw clench EEG cue",
+    },
+};
+export function EegTrainingCard({ instruction, cue }) {
+    const { isDark } = useTheme();
     const [isTraining, setIsTraining] = React.useState(false);
     const [isStarting, setIsStarting] = React.useState(false);
     const [statusMessage, setStatusMessage] = React.useState("Press Start to launch EEG service and begin.");
+    const cueAsset = cue ? (isDark ? CUE_ASSETS[cue].dark : CUE_ASSETS[cue].light) : null;
+    const cueAlt = cue ? CUE_ASSETS[cue].alt : "";
     const startTraining = React.useCallback(async () => {
         setIsStarting(true);
-        setStatusMessage("Launching EEG backend...");
+        setStatusMessage("Launching EEG backend and waiting for stream confirmation...");
         try {
             const launchResult = await window.electron.startEegBackend();
             if (!launchResult.ok) {
@@ -37,14 +57,14 @@ export function EegTrainingCard({ instruction }) {
             // no-op: keep UI responsive even if backend endpoint is temporarily unavailable
         }
     }, []);
-    return (_jsxs("div", { style: styles.container, children: [_jsxs("div", { style: styles.headerBlock, children: [_jsx("p", { style: styles.subtitle, children: instruction }), _jsx("p", { style: styles.statusText, children: statusMessage })] }), _jsx("div", { style: styles.gifCard, children: _jsx("div", { style: styles.gifInner, children: _jsx("div", { style: styles.gifText, children: "EEG Training Cue" }) }) }), _jsx("div", { style: styles.buttonWrapper, children: !isTraining ? (_jsx("button", { type: "button", onClick: startTraining, style: {
+    return (_jsxs("div", { style: styles.container, children: [_jsxs("div", { style: styles.headerBlock, children: [_jsx("p", { style: styles.subtitle, children: instruction }), _jsx("p", { style: styles.statusText, children: statusMessage })] }), _jsxs("div", { style: styles.gifCard, children: [cueAsset ? (_jsx("div", { style: styles.gifInner, children: _jsx("img", { src: cueAsset, alt: cueAlt, style: styles.gifImage }) })) : null, _jsxs("div", { style: styles.feedGrid, children: [_jsx("img", { src: "http://localhost:8770/waves", alt: "EEG waves calibration feed", style: styles.feedImage }), _jsx("img", { src: "http://localhost:8770/topo", alt: "EEG topomap calibration feed", style: styles.feedImage })] })] }), _jsx("div", { style: styles.buttonWrapper, children: !isTraining ? (_jsx("button", { type: "button", onClick: startTraining, style: {
                         ...styles.startButton,
                         ...(isStarting ? styles.buttonDisabled : {}),
                     }, disabled: isStarting, children: isStarting ? "Starting..." : "Start" })) : (_jsxs("button", { type: "button", onClick: stopTraining, style: styles.statusBar, children: [_jsx(motion.span, { style: styles.statusDot, animate: { scale: [1, 1.25, 1], opacity: [1, 0.6, 1] }, transition: { duration: 1.2, repeat: Infinity } }), "Training...", _jsx("div", { style: styles.fakeFill })] })) })] }));
 }
 const BUTTON_WIDTH = 180;
 const BUTTON_HEIGHT = 42;
-const GIF_WIDTH = 420;
+const CARD_MAX_WIDTH = 500;
 const styles = {
     container: {
         display: "flex",
@@ -54,7 +74,8 @@ const styles = {
         width: "100%",
     },
     headerBlock: {
-        width: GIF_WIDTH,
+        width: "100%",
+        maxWidth: CARD_MAX_WIDTH,
         textAlign: "center",
     },
     subtitle: {
@@ -68,19 +89,38 @@ const styles = {
         color: "var(--text-secondary)",
     },
     gifCard: {
-        width: GIF_WIDTH,
+        width: "100%",
+        maxWidth: CARD_MAX_WIDTH,
         borderRadius: 20,
-        border: "1px solid var(--border)",
+        border: "1px solid var(--pink-border)",
         background: "var(--bg-secondary)",
         padding: 16,
+        display: "grid",
+        gap: 12,
+    },
+    feedGrid: {
+        display: "grid",
+        gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
+        gap: 12,
+    },
+    feedImage: {
+        width: "100%",
+        height: 84,
+        borderRadius: 8,
+        border: "1px solid var(--border)",
+        background: "var(--bg-primary)",
+        objectFit: "cover",
+        overflow: "hidden",
     },
     gifInner: {
-        height: 240,
+        minHeight: 250,
         borderRadius: 16,
-        border: "1px dashed var(--border)",
-        background: "var(--bg-tertiary)",
+        border: "1px solid transparent",
+        background: "linear-gradient(180deg, rgba(255,45,141,0.12), rgba(255,45,141,0.04))",
         display: "grid",
         placeItems: "center",
+        padding: 8,
+        overflow: "hidden",
     },
     gifText: {
         fontSize: 12,
@@ -89,8 +129,18 @@ const styles = {
         textTransform: "uppercase",
         color: "var(--text-secondary)",
     },
+    gifImage: {
+        width: "88%",
+        height: "auto",
+        maxWidth: 360,
+        maxHeight: 220,
+        borderRadius: 12,
+        objectFit: "contain",
+        display: "block",
+    },
     buttonWrapper: {
-        width: GIF_WIDTH,
+        width: "100%",
+        maxWidth: CARD_MAX_WIDTH,
         display: "flex",
         justifyContent: "center",
     },

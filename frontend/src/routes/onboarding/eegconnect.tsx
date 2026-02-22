@@ -5,12 +5,12 @@ export function EEGConnectStep() {
   const [isBooting, setIsBooting] = React.useState(false);
   const [isReady, setIsReady] = React.useState(false);
   const [statusMessage, setStatusMessage] = React.useState(
-    "Press Start to launch the EEG backend terminal and connect your headset stream."
+    "Press Start to launch the Muse Bluetooth stream and wait for EEG tracking confirmation."
   );
 
   const startService = React.useCallback(async () => {
     setIsBooting(true);
-    setStatusMessage("Launching EEG backend...");
+    setStatusMessage("Starting Muse Bluetooth stream and waiting for EEG stream confirmation...");
     try {
       const launchResult = await window.electron.startEegBackend();
       if (!launchResult.ok) {
@@ -20,7 +20,7 @@ export function EEGConnectStep() {
       }
       await enableEEG();
       setIsReady(true);
-      setStatusMessage("EEG backend running. Ensure Muse LSL stream is active.");
+      setStatusMessage("EEG stream confirmed. Backend is active.");
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       setIsReady(false);
@@ -49,7 +49,7 @@ export function EEGConnectStep() {
           return;
         }
         setIsReady(true);
-        setStatusMessage("EEG backend already running. Continue to baseline calibration.");
+        setStatusMessage("EEG stream already confirmed. Continue to baseline calibration.");
       } catch {
         // no-op
       }
@@ -65,7 +65,7 @@ export function EEGConnectStep() {
       <div style={styles.card}>
         <h3 style={styles.title}>EEG Service</h3>
         <p style={styles.description}>
-          Start the EEG backend from onboarding, then keep your headset nearby and streaming.
+          This step turns on Muse Bluetooth, waits for headset streaming, and then enables EEG tracking.
         </p>
         <p style={styles.status}>{statusMessage}</p>
         <div style={styles.controls}>
@@ -131,6 +131,7 @@ const styles: Record<string, React.CSSProperties> = {
   controls: {
     display: "flex",
     gap: 10,
+    justifyContent: "center",
   },
   startButton: {
     height: 40,

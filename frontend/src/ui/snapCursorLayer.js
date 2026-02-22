@@ -25,10 +25,15 @@ const AUTO_LOCK_DWELL_MS = 260;
 const SLOW_SPEED_PX_PER_MS = 0.24;
 const TARGET_COOLDOWN_MS = 640;
 const DETACH_ANIM_MS = 220;
-const OFFSCREEN_MARGIN_PX = 24;
 const CV_POINTER_STICK_MS = 180;
-const CV_STATUS_URL = "http://127.0.0.1:8767/status";
+const DEFAULT_CV_STATUS_URL = "http://127.0.0.1:8767/status";
 const CV_BACKEND_CHECK_INTERVAL_MS = 900;
+function clamp(value, min, max) {
+    if (max < min) {
+        return min;
+    }
+    return Math.max(min, Math.min(max, value));
+}
 function clamp01(value) {
     return Math.max(0, Math.min(1, value));
 }
@@ -41,6 +46,37 @@ function normalize(x, y) {
         return { x: 0, y: 0 };
     }
     return { x: x / len, y: y / len };
+}
+function getWindowScreenOffset() {
+    const maybeWindow = window;
+    const rawX = Number(typeof maybeWindow.screenX === "number"
+        ? maybeWindow.screenX
+        : maybeWindow.screenLeft);
+    const rawY = Number(typeof maybeWindow.screenY === "number"
+        ? maybeWindow.screenY
+        : maybeWindow.screenTop);
+    return {
+        x: Number.isFinite(rawX) ? rawX : 0,
+        y: Number.isFinite(rawY) ? rawY : 0,
+    };
+}
+function mapScreenPointToLocal(screenX, screenY) {
+    const offset = getWindowScreenOffset();
+    return {
+        x: screenX - offset.x,
+        y: screenY - offset.y,
+    };
+}
+function clampPointToViewport(x, y) {
+    const maxX = Math.max(0, window.innerWidth);
+    const maxY = Math.max(0, window.innerHeight);
+    const clampedX = clamp(x, 0, maxX);
+    const clampedY = clamp(y, 0, maxY);
+    return {
+        x: clampedX,
+        y: clampedY,
+        clamped: Math.abs(clampedX - x) > 0.5 || Math.abs(clampedY - y) > 0.5,
+    };
 }
 function scorePriority(el) {
     const tag = el.tagName.toLowerCase();
@@ -106,6 +142,10 @@ function isEditableElement(node) {
 }
 function isVisibleTarget(el) {
     if (el.closest("[data-snap-ignore='true']")) {
+        return false;
+    }
+    const modalOpen = document.documentElement.getAttribute("data-snap-modal-open") === "true";
+    if (modalOpen && !el.closest("[data-snap-modal-root='true']")) {
         return false;
     }
     const rect = el.getBoundingClientRect();
@@ -249,6 +289,28 @@ export default function SnapCursorLayer() {
     const cvPointerActiveUntilRef = React.useRef(0);
     const cvBackendReadyRef = React.useRef(false);
     const cvBackendLastCheckRef = React.useRef(-CV_BACKEND_CHECK_INTERVAL_MS);
+    const cvStatusUrlRef = React.useRef(DEFAULT_CV_STATUS_URL);
+    React.useEffect(() => {
+        if (typeof window.electron?.getCvStatusUrl !== "function") {
+            return;
+        }
+        let active = true;
+        void window.electron.getCvStatusUrl()
+            .then(url => {
+            if (!active) {
+                return;
+            }
+            if (typeof url === "string" && url.trim()) {
+                cvStatusUrlRef.current = url.trim();
+            }
+        })
+            .catch(() => {
+            // no-op
+        });
+        return () => {
+            active = false;
+        };
+    }, []);
     const publishTargets = React.useCallback(() => {
         const domTargets = domTargetsRef.current;
         const systemTargets = systemTargetsRef.current;
@@ -337,8 +399,7 @@ export default function SnapCursorLayer() {
                 if (!active || !response || !Array.isArray(response.targets)) {
                     return;
                 }
-                const offsetX = Number(window.screenX || 0);
-                const offsetY = Number(window.screenY || 0);
+                const offset = getWindowScreenOffset();
                 const mapped = [];
                 for (const target of response.targets) {
                     const width = Number(target.width);
@@ -351,14 +412,8 @@ export default function SnapCursorLayer() {
                     if (!Number.isFinite(screenLeft) || !Number.isFinite(screenTop)) {
                         continue;
                     }
-                    const left = screenLeft - offsetX;
-                    const top = screenTop - offsetY;
-                    if (left + width < -OFFSCREEN_MARGIN_PX
-                        || top + height < -OFFSCREEN_MARGIN_PX
-                        || left > window.innerWidth + OFFSCREEN_MARGIN_PX
-                        || top > window.innerHeight + OFFSCREEN_MARGIN_PX) {
-                        continue;
-                    }
+                    const left = screenLeft - offset.x;
+                    const top = screenTop - offset.y;
                     const cleanKind = typeof target.kind === "string" && target.kind.trim()
                         ? target.kind.trim()
                         : "control";
@@ -432,25 +487,17 @@ export default function SnapCursorLayer() {
                 if (!active || !point) {
                     return;
                 }
-                const localX = Number(point.x) - Number(window.screenX || 0);
-                const localY = Number(point.y) - Number(window.screenY || 0);
+                const localPoint = mapScreenPointToLocal(Number(point.x), Number(point.y));
+                const localX = localPoint.x;
+                const localY = localPoint.y;
                 const frame = frameRef.current;
                 if (performance.now() < cvPointerActiveUntilRef.current) {
                     return;
                 }
                 if (Number.isFinite(localX) && Number.isFinite(localY)) {
-                    const isNearWindow = (localX >= -OFFSCREEN_MARGIN_PX
-                        && localY >= -OFFSCREEN_MARGIN_PX
-                        && localX <= window.innerWidth + OFFSCREEN_MARGIN_PX
-                        && localY <= window.innerHeight + OFFSCREEN_MARGIN_PX);
-                    if (isNearWindow) {
-                        frame.hasPointer = true;
-                        frame.pointerX = localX;
-                        frame.pointerY = localY;
-                    }
-                    else {
-                        frame.hasPointer = false;
-                    }
+                    frame.hasPointer = true;
+                    frame.pointerX = localX;
+                    frame.pointerY = localY;
                 }
             }
             catch {
@@ -500,7 +547,8 @@ export default function SnapCursorLayer() {
                 const controller = new AbortController();
                 const timeout = window.setTimeout(() => controller.abort(), 700);
                 try {
-                    const response = await fetch(CV_STATUS_URL, { signal: controller.signal });
+                    const statusUrl = cvStatusUrlRef.current || DEFAULT_CV_STATUS_URL;
+                    const response = await fetch(statusUrl, { signal: controller.signal });
                     if (!response.ok) {
                         cvBackendReadyRef.current = false;
                         return;
@@ -513,32 +561,37 @@ export default function SnapCursorLayer() {
                     if (event.intent !== "gaze_target" || !event.payload) {
                         return;
                     }
-                    let xNorm = null;
-                    let yNorm = null;
-                    const targetX = event.payload.target_x;
-                    const targetY = event.payload.target_y;
-                    if (Number.isFinite(targetX)
-                        && Number.isFinite(targetY)
-                        && Number.isFinite(payload.screen_width)
-                        && Number.isFinite(payload.screen_height)
-                        && Number(payload.screen_width) > 1
-                        && Number(payload.screen_height) > 1) {
-                        xNorm = Number(targetX) / (Number(payload.screen_width) - 1);
-                        yNorm = Number(targetY) / (Number(payload.screen_height) - 1);
+                    let mappedPoint = null;
+                    const targetX = Number(event.payload.target_x);
+                    const targetY = Number(event.payload.target_y);
+                    if (Number.isFinite(targetX) && Number.isFinite(targetY)) {
+                        mappedPoint = mapScreenPointToLocal(targetX, targetY);
                     }
-                    else if (Number.isFinite(event.payload.x_norm) && Number.isFinite(event.payload.y_norm)) {
-                        xNorm = Number(event.payload.x_norm);
-                        yNorm = Number(event.payload.y_norm);
+                    else {
+                        const xNorm = Number(event.payload.x_norm);
+                        const yNorm = Number(event.payload.y_norm);
+                        const hasNorm = Number.isFinite(xNorm) && Number.isFinite(yNorm);
+                        const screenWidth = Number(payload.screen_width);
+                        const screenHeight = Number(payload.screen_height);
+                        if (hasNorm && Number.isFinite(screenWidth) && Number.isFinite(screenHeight) && screenWidth > 1 && screenHeight > 1) {
+                            const screenX = clamp01(xNorm) * (screenWidth - 1);
+                            const screenY = clamp01(yNorm) * (screenHeight - 1);
+                            mappedPoint = mapScreenPointToLocal(screenX, screenY);
+                        }
+                        else if (hasNorm) {
+                            mappedPoint = {
+                                x: clamp01(xNorm) * window.innerWidth,
+                                y: clamp01(yNorm) * window.innerHeight,
+                            };
+                        }
                     }
-                    if (!Number.isFinite(xNorm) || !Number.isFinite(yNorm)) {
+                    if (!mappedPoint || !Number.isFinite(mappedPoint.x) || !Number.isFinite(mappedPoint.y)) {
                         return;
                     }
-                    const clampedX = clamp01(Number(xNorm));
-                    const clampedY = clamp01(Number(yNorm));
                     const frame = frameRef.current;
                     frame.hasPointer = true;
-                    frame.pointerX = clampedX * window.innerWidth;
-                    frame.pointerY = clampedY * window.innerHeight;
+                    frame.pointerX = mappedPoint.x;
+                    frame.pointerY = mappedPoint.y;
                     cvPointerActiveUntilRef.current = performance.now() + CV_POINTER_STICK_MS;
                 }
                 finally {
@@ -615,17 +668,18 @@ export default function SnapCursorLayer() {
                 }
                 if (target.source === "system") {
                     event.preventDefault();
+                    const offset = getWindowScreenOffset();
                     if (typeof window.electron?.commitSystemSnapTarget === "function") {
-                        const x = target.cx + Number(window.screenX || 0);
-                        const y = target.cy + Number(window.screenY || 0);
+                        const x = target.cx + offset.x;
+                        const y = target.cy + offset.y;
                         void window.electron.commitSystemSnapTarget({ x, y });
                     }
                     else if (typeof window.electron?.commitNearestSnapTarget === "function") {
                         void window.electron.commitNearestSnapTarget();
                     }
                     else if (typeof window.electron?.moveCursorToScreenPoint === "function") {
-                        const x = target.cx + Number(window.screenX || 0);
-                        const y = target.cy + Number(window.screenY || 0);
+                        const x = target.cx + offset.x;
+                        const y = target.cy + offset.y;
                         void window.electron.moveCursorToScreenPoint({ x, y });
                     }
                     lastHotkeyAtRef.current = now;
@@ -674,8 +728,9 @@ export default function SnapCursorLayer() {
             frame.dwellMs = 0;
             frame.snapBoostUntilMs = now + 170;
             if (target.source === "system" && typeof window.electron?.moveCursorToScreenPoint === "function") {
-                const x = target.cx + Number(window.screenX || 0);
-                const y = target.cy + Number(window.screenY || 0);
+                const offset = getWindowScreenOffset();
+                const x = target.cx + offset.x;
+                const y = target.cy + offset.y;
                 frame.pointerX = target.cx;
                 frame.pointerY = target.cy;
                 frame.prevPointerX = target.cx;
@@ -856,12 +911,47 @@ export default function SnapCursorLayer() {
     const suggested = ui.suggestedId ? targets.find(t => t.id === ui.suggestedId) || null : null;
     const locked = ui.lockedId ? targets.find(t => t.id === ui.lockedId) || null : null;
     const suggestedIsSystem = suggested?.source === "system";
-    return (_jsxs("div", { "data-snap-ignore": "true", style: styles.root, children: [suggested ? (_jsx("div", { style: {
+    const pointerVisual = clampPointToViewport(ui.x, ui.y);
+    const suggestedVisual = (() => {
+        if (!suggested) {
+            return null;
+        }
+        const viewportWidth = window.innerWidth;
+        const viewportHeight = window.innerHeight;
+        const isInViewport = (suggested.left + suggested.width >= 0
+            && suggested.top + suggested.height >= 0
+            && suggested.left <= viewportWidth
+            && suggested.top <= viewportHeight);
+        if (isInViewport) {
+            return {
+                left: suggested.left,
+                top: suggested.top,
+                width: suggested.width,
+                height: suggested.height,
+                isOffscreen: false,
+            };
+        }
+        const anchor = clampPointToViewport(suggested.cx, suggested.cy);
+        const proxyWidth = Math.min(220, Math.max(120, Math.min(suggested.width + 28, 180)));
+        const proxyHeight = 36;
+        return {
+            left: clamp(anchor.x - proxyWidth * 0.5, 6, Math.max(6, viewportWidth - proxyWidth - 6)),
+            top: clamp(anchor.y - proxyHeight * 0.5, 6, Math.max(6, viewportHeight - proxyHeight - 6)),
+            width: proxyWidth,
+            height: proxyHeight,
+            isOffscreen: true,
+        };
+    })();
+    return (_jsxs("div", { "data-snap-ignore": "true", style: styles.root, children: [suggested && suggestedVisual ? (_jsx("div", { style: {
                     ...styles.targetHint,
-                    left: suggested.left,
-                    top: suggested.top,
-                    width: suggested.width,
-                    height: suggested.height,
+                    left: suggestedVisual.left,
+                    top: suggestedVisual.top,
+                    width: suggestedVisual.width,
+                    height: suggestedVisual.height,
+                    borderStyle: suggestedVisual.isOffscreen ? "dashed" : "solid",
+                    background: suggestedVisual.isOffscreen
+                        ? "linear-gradient(135deg, rgba(82,128,255,0.18), rgba(8,14,22,0.22))"
+                        : styles.targetHint.background,
                     borderColor: locked
                         ? "rgba(0,194,170,0.95)"
                         : suggestedIsSystem
@@ -872,11 +962,13 @@ export default function SnapCursorLayer() {
                         : suggestedIsSystem
                             ? "0 0 0 6px rgba(82,128,255,0.15), 0 6px 18px rgba(82,128,255,0.2)"
                             : "0 0 0 6px rgba(255,45,141,0.13), 0 6px 18px rgba(255,45,141,0.18)",
-                }, children: _jsxs("div", { style: styles.targetLabel, children: [suggested.label, suggestedIsSystem ? " (system)" : ""] }) })) : null, _jsx("div", { style: {
+                }, children: _jsxs("div", { style: suggestedVisual.isOffscreen ? styles.targetLabelInline : styles.targetLabel, children: [suggested.label, suggestedVisual.isOffscreen ? " (offscreen)" : "", suggestedIsSystem ? " (system)" : ""] }) })) : null, _jsx("div", { style: {
                     ...styles.cursorCore,
-                    left: ui.x,
-                    top: ui.y,
+                    left: pointerVisual.x,
+                    top: pointerVisual.y,
                     transform: `translate(-50%, -50%) scale(${locked ? 1.22 : suggested ? 1.08 : 1})`,
+                    borderStyle: pointerVisual.clamped ? "dashed" : "solid",
+                    opacity: pointerVisual.clamped ? 0.86 : 1,
                     borderColor: locked
                         ? "rgba(0,194,170,0.96)"
                         : suggestedIsSystem
@@ -892,8 +984,8 @@ export default function SnapCursorLayer() {
                         background: locked ? "#00c2aa" : suggestedIsSystem ? "#5280ff" : "#FF2D8D",
                     } }) }), ui.detachProgress > 0 ? (_jsx("div", { style: {
                     ...styles.detachPulse,
-                    left: ui.x,
-                    top: ui.y,
+                    left: pointerVisual.x,
+                    top: pointerVisual.y,
                     opacity: ui.detachProgress,
                     transform: `translate(-50%, -50%) scale(${1 + (1 - ui.detachProgress) * 0.55})`,
                 } })) : null, _jsxs("div", { style: styles.hudPill, children: [_jsx("span", { style: styles.hudMode, children: ui.modeText }), _jsxs("span", { style: styles.hudHint, children: [providerLabel, " | G lock | ] cycle | Esc release | Ctrl+Shift+S toggle | Cmd/Ctrl+Shift+G global"] })] })] }));
@@ -926,6 +1018,24 @@ const styles = {
         border: "1px solid rgba(255,255,255,0.2)",
         whiteSpace: "nowrap",
         maxWidth: 220,
+        overflow: "hidden",
+        textOverflow: "ellipsis",
+    },
+    targetLabelInline: {
+        position: "absolute",
+        top: "50%",
+        left: 10,
+        transform: "translateY(-50%)",
+        padding: "3px 8px",
+        borderRadius: 999,
+        fontSize: 10,
+        fontWeight: 700,
+        color: "white",
+        letterSpacing: "0.03em",
+        background: "rgba(10,14,18,0.8)",
+        border: "1px solid rgba(255,255,255,0.2)",
+        whiteSpace: "nowrap",
+        maxWidth: 200,
         overflow: "hidden",
         textOverflow: "ellipsis",
     },

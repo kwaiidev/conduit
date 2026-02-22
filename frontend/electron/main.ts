@@ -6,6 +6,7 @@ import net from "net";
 import http from "http";
 
 let win: BrowserWindow | null = null;
+let snapOverlayWin: BrowserWindow | null = null;
 let currentMode: 'full' | 'overlay' = 'full';
 let pendingFullRoute: string | null = null;
 let isToggling = false;
@@ -13,11 +14,20 @@ let cvBackendPid: number | null = null;
 let voiceBackendPid: number | null = null;
 let signBackendPid: number | null = null;
 let eegBackendPid: number | null = null;
+let museStreamPid: number | null = null;
+let eegAutoRestartArmedPid: number | null = null;
+let eegStopRequested = false;
+let eegAutoRestartTimer: NodeJS.Timeout | null = null;
+let isBackendShutdownInProgress = false;
+const managedBackendPids = new Set<number>();
 const SYSTEM_TARGET_TIMEOUT_MS = 1600;
 const SYSTEM_ACTION_TIMEOUT_MS = 1200;
 const SNAP_GLOBAL_SHORTCUT = "CommandOrControl+Shift+G";
 const SNAP_TARGET_COOLDOWN_MS = 520;
 const SYSTEM_TARGET_MAX_COUNT = 900;
+const EEG_STREAM_READY_TIMEOUT_MS = 60000;
+const EEG_LSL_STREAM_POLL_TIMEOUT_MS = 1000;
+const EEG_AUTO_RESTART_DELAY_MS = 1200;
 const parsePort = (value: string | undefined, fallback: number): number => {
   const parsed = Number.parseInt(value || "", 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
@@ -941,17 +951,28 @@ function probeHttp(
   });
 }
 
-async function probeEegBackendHealth(timeoutMs = 1000): Promise<boolean> {
+type EegHealthProbe = {
+  serviceReady: boolean;
+  streamConnected: boolean;
+};
+
+async function probeEegBackendHealth(timeoutMs = 1000): Promise<EegHealthProbe> {
   const probe = await probeHttp("127.0.0.1", EEG_HTTP_PORT, EEG_HEALTH_PATH, timeoutMs);
   if (!probe.ok || probe.statusCode !== 200) {
-    return false;
+    return { serviceReady: false, streamConnected: false };
   }
 
   try {
-    const parsed = JSON.parse(probe.body) as { service?: string };
-    return parsed.service === EEG_SERVICE_ID;
+    const parsed = JSON.parse(probe.body) as {
+      service?: string;
+      stream_connected?: boolean;
+      streamConnected?: boolean;
+    };
+    const serviceReady = parsed.service === EEG_SERVICE_ID;
+    const streamConnected = serviceReady && (parsed.stream_connected === true || parsed.streamConnected === true);
+    return { serviceReady, streamConnected };
   } catch {
-    return false;
+    return { serviceReady: false, streamConnected: false };
   }
 }
 
@@ -980,17 +1001,172 @@ async function waitForEegBackendReady(
   pid: number | null
 ): Promise<boolean> {
   const startedAt = Date.now();
-  while (Date.now() - startedAt < timeoutMs) {
+  const hasTimeout = timeoutMs > 0;
+  while (!hasTimeout || Date.now() - startedAt < timeoutMs) {
     if (pid && !isPidAlive(pid)) {
       return false;
     }
-    const ok = await probeEegBackendHealth(900);
-    if (ok) {
+    const health = await probeEegBackendHealth(900);
+    if (health.streamConnected) {
       return true;
     }
     await sleep(250);
   }
   return false;
+}
+
+function launchMuseStreamInBackground(eegDir: string, pythonBin: string): { ok: boolean; message: string } {
+  if (isPidAlive(museStreamPid)) {
+    return { ok: true, message: `Muse stream process already running (pid ${museStreamPid}).` };
+  }
+  museStreamPid = null;
+
+  const logsDir = path.join(path.dirname(eegDir), ".dist");
+  try {
+    fs.mkdirSync(logsDir, { recursive: true });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { ok: false, message: `Cannot create logs directory: ${message}` };
+  }
+  const logPath = path.join(logsDir, "eeg-muse-stream.log");
+
+  const args = ["-m", "muselsl", "stream"];
+  try {
+    const logFd = fs.openSync(logPath, "a");
+    try {
+      const child = spawn(pythonBin, args, {
+        cwd: eegDir,
+        env: {
+          ...process.env,
+          PYTHONUNBUFFERED: "1",
+        },
+        detached: true,
+        stdio: ["ignore", logFd, logFd],
+      });
+
+      const spawnedPid = child.pid ?? null;
+      museStreamPid = spawnedPid;
+      child.on("exit", (code, signal) => {
+        if (museStreamPid === spawnedPid) {
+          museStreamPid = null;
+          unregisterManagedBackendPid(spawnedPid);
+          console.warn(`[EEG] Muse stream exited (code=${code ?? "null"} signal=${signal ?? "none"}).`);
+        }
+      });
+      child.on("error", error => {
+        if (museStreamPid === spawnedPid) {
+          museStreamPid = null;
+          unregisterManagedBackendPid(spawnedPid);
+        }
+        console.warn(`[EEG] Muse stream start error: ${error.message}`);
+      });
+      child.unref();
+      registerManagedBackendPid(spawnedPid);
+      return {
+        ok: true,
+        message: `Started Muse stream in background (pid ${child.pid ?? "unknown"}). Logs: ${logPath}`,
+      };
+    } finally {
+      fs.closeSync(logFd);
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    museStreamPid = null;
+    unregisterManagedBackendPid(museStreamPid);
+    return { ok: false, message: `Failed to launch Muse stream: ${message}` };
+  }
+}
+
+async function checkForEegLslStream(
+  pythonBin: string,
+  eegDir: string,
+  timeoutMs = EEG_LSL_STREAM_POLL_TIMEOUT_MS
+): Promise<boolean> {
+  const script = [
+    "from pylsl import resolve_byprop",
+    `streams = resolve_byprop('type', 'EEG', 1, 1.0)`,
+    "print('1' if streams else '0')",
+  ].join(";");
+
+  return await new Promise(resolve => {
+    let resolved = false;
+    let buffer = "";
+    const child = spawn(pythonBin, ["-c", script], {
+      cwd: eegDir,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    const finish = (value: boolean) => {
+      if (resolved) {
+        return;
+      }
+      resolved = true;
+      resolve(value);
+    };
+
+    const timer = setTimeout(() => {
+      if (!child.killed) {
+        child.kill("SIGKILL");
+      }
+      finish(false);
+    }, Math.max(250, timeoutMs));
+
+    child.stdout.on("data", chunk => {
+      buffer += chunk.toString("utf8");
+    });
+    child.stderr.on("data", () => {
+      // no-op
+    });
+    child.once("error", () => {
+      clearTimeout(timer);
+      finish(false);
+    });
+    child.once("exit", () => {
+      clearTimeout(timer);
+      finish(buffer.trim().startsWith("1"));
+    });
+  });
+}
+
+async function waitForEegLslStream(
+  eegDir: string,
+  pythonBin: string,
+  pid: number | null
+): Promise<boolean> {
+  while (true) {
+    if (pid && !isPidAlive(pid)) {
+      return false;
+    }
+    const streamFound = await checkForEegLslStream(pythonBin, eegDir, 1000);
+    if (streamFound) {
+      return true;
+    }
+    await sleep(1000);
+  }
+}
+
+function stopMuseStream(options?: { force?: boolean; reason?: string }): { ok: boolean; message: string } {
+  const pid = museStreamPid;
+  if (!pid) {
+    return { ok: true, message: "Muse stream not running." };
+  }
+
+  if (!isPidAlive(pid)) {
+    museStreamPid = null;
+    return { ok: true, message: `Muse stream already exited (pid ${pid}).` };
+  }
+
+  const force = options?.force === true;
+  const signal: NodeJS.Signals = force ? "SIGKILL" : "SIGTERM";
+  const killed = killManagedBackendPid(pid, signal);
+  if (!killed) {
+    return { ok: false, message: `Failed to stop Muse stream (pid ${pid}).` };
+  }
+
+  unregisterManagedBackendPid(pid);
+  museStreamPid = null;
+  const reason = options?.reason ? ` (${options.reason})` : "";
+  return { ok: true, message: `Stopped Muse stream (pid ${pid})${reason}.` };
 }
 
 function isPidAlive(pid: number | null): boolean {
@@ -1002,6 +1178,18 @@ function isPidAlive(pid: number | null): boolean {
     return true;
   } catch {
     return false;
+  }
+}
+
+function registerManagedBackendPid(pid: number | null): void {
+  if (pid && pid > 0) {
+    managedBackendPids.add(pid);
+  }
+}
+
+function unregisterManagedBackendPid(pid: number | null): void {
+  if (pid && pid > 0) {
+    managedBackendPids.delete(pid);
   }
 }
 
@@ -1034,6 +1222,26 @@ function killManagedBackendPid(pid: number, signal: NodeJS.Signals): boolean {
   }
 }
 
+function stopAllBackends(reason?: string): void {
+  if (isBackendShutdownInProgress) {
+    return;
+  }
+
+  isBackendShutdownInProgress = true;
+  const options = { force: true, reason: reason ?? "shutdown" };
+  stopCvBackend(options);
+  stopVoiceBackend(options);
+  stopSignBackend(options);
+  stopEegBackend(options);
+
+  for (const pid of Array.from(managedBackendPids)) {
+    if (isPidAlive(pid)) {
+      killManagedBackendPid(pid, "SIGKILL");
+    }
+    unregisterManagedBackendPid(pid);
+  }
+}
+
 function stopCvBackend(options?: { force?: boolean; reason?: string }): { ok: boolean; message: string } {
   const pid = cvBackendPid;
   if (!pid) {
@@ -1052,6 +1260,7 @@ function stopCvBackend(options?: { force?: boolean; reason?: string }): { ok: bo
     return { ok: false, message: `Failed to stop CV backend (pid ${pid}).` };
   }
 
+  unregisterManagedBackendPid(pid);
   cvBackendPid = null;
   const reason = options?.reason ? ` (${options.reason})` : "";
   return { ok: true, message: `Stopped CV backend (pid ${pid})${reason}.` };
@@ -1168,15 +1377,18 @@ function launchCvBackendInBackground(cameraIndex: number): { ok: boolean; messag
       cvBackendPid = child.pid ?? null;
       child.on("exit", () => {
         if (cvBackendPid === child.pid) {
+          unregisterManagedBackendPid(child.pid);
           cvBackendPid = null;
         }
       });
       child.on("error", () => {
         if (cvBackendPid === child.pid) {
+          unregisterManagedBackendPid(child.pid);
           cvBackendPid = null;
         }
       });
       child.unref();
+      registerManagedBackendPid(cvBackendPid);
       return {
         ok: true,
         message: `Launched backend in background (pid ${child.pid ?? "unknown"}). Logs: ${logPath}`,
@@ -1225,6 +1437,7 @@ function stopVoiceBackend(options?: { force?: boolean; reason?: string }): { ok:
     return { ok: false, message: `Failed to stop voice backend (pid ${pid}).` };
   }
 
+  unregisterManagedBackendPid(pid);
   voiceBackendPid = null;
   const reason = options?.reason ? ` (${options.reason})` : "";
   return { ok: true, message: `Stopped voice backend (pid ${pid})${reason}.` };
@@ -1271,15 +1484,18 @@ function launchVoiceBackendInBackground(): { ok: boolean; message: string } {
       voiceBackendPid = child.pid ?? null;
       child.on("exit", () => {
         if (voiceBackendPid === child.pid) {
+          unregisterManagedBackendPid(child.pid);
           voiceBackendPid = null;
         }
       });
       child.on("error", () => {
         if (voiceBackendPid === child.pid) {
+          unregisterManagedBackendPid(child.pid);
           voiceBackendPid = null;
         }
       });
       child.unref();
+      registerManagedBackendPid(voiceBackendPid);
       return {
         ok: true,
         message: `Launched voice backend in background (pid ${child.pid ?? "unknown"}). Logs: ${logPath}`,
@@ -1328,6 +1544,7 @@ function stopSignBackend(options?: { force?: boolean; reason?: string }): { ok: 
     return { ok: false, message: `Failed to stop sign backend (pid ${pid}).` };
   }
 
+  unregisterManagedBackendPid(pid);
   signBackendPid = null;
   const reason = options?.reason ? ` (${options.reason})` : "";
   return { ok: true, message: `Stopped sign backend (pid ${pid})${reason}.` };
@@ -1378,15 +1595,18 @@ function launchSignBackendInBackground(): { ok: boolean; message: string } {
       signBackendPid = child.pid ?? null;
       child.on("exit", () => {
         if (signBackendPid === child.pid) {
+          unregisterManagedBackendPid(child.pid);
           signBackendPid = null;
         }
       });
       child.on("error", () => {
         if (signBackendPid === child.pid) {
+          unregisterManagedBackendPid(child.pid);
           signBackendPid = null;
         }
       });
       child.unref();
+      registerManagedBackendPid(signBackendPid);
       return {
         ok: true,
         message: `Launched sign backend in background (pid ${child.pid ?? "unknown"}). Logs: ${logPath}`,
@@ -1417,7 +1637,60 @@ async function startSignBackendAndWait(): Promise<{ ok: boolean; message: string
   return launch;
 }
 
+function clearEegAutoRestartTimer(): void {
+  if (!eegAutoRestartTimer) {
+    return;
+  }
+  clearTimeout(eegAutoRestartTimer);
+  eegAutoRestartTimer = null;
+}
+
+function maybeAutoRestartEegBackend(exitedPid: number | null, reason: string): void {
+  if (!exitedPid) {
+    return;
+  }
+  if (eegBackendPid === exitedPid) {
+    eegBackendPid = null;
+  }
+
+  const shouldAutoRestart = !eegStopRequested && eegAutoRestartArmedPid === exitedPid;
+  if (!shouldAutoRestart) {
+    if (eegAutoRestartArmedPid === exitedPid) {
+      eegAutoRestartArmedPid = null;
+    }
+    return;
+  }
+
+  eegAutoRestartArmedPid = null;
+  if (eegAutoRestartTimer) {
+    return;
+  }
+
+  console.warn(`[EEG] Backend exited (${reason}). Scheduling auto-restart.`);
+  eegAutoRestartTimer = setTimeout(() => {
+    eegAutoRestartTimer = null;
+    if (eegStopRequested || isPidAlive(eegBackendPid)) {
+      return;
+    }
+    void startEegBackendAndWait({ autoRestart: true }).then(result => {
+      if (!result.ok) {
+        console.warn(`[EEG] Auto-restart failed: ${result.message}`);
+      } else {
+        console.log("[EEG] Auto-restart completed.");
+      }
+    });
+  }, EEG_AUTO_RESTART_DELAY_MS);
+}
+
 function stopEegBackend(options?: { force?: boolean; reason?: string }): { ok: boolean; message: string } {
+  eegStopRequested = true;
+  eegAutoRestartArmedPid = null;
+  clearEegAutoRestartTimer();
+  const streamStop = stopMuseStream({ force: true, reason: options?.reason ?? "eeg-stop" });
+  if (!streamStop.ok) {
+    console.warn(`[EEG] ${streamStop.message}`);
+  }
+
   const pid = eegBackendPid;
   if (!pid) {
     return { ok: true, message: "EEG backend not running." };
@@ -1435,6 +1708,7 @@ function stopEegBackend(options?: { force?: boolean; reason?: string }): { ok: b
     return { ok: false, message: `Failed to stop EEG backend (pid ${pid}).` };
   }
 
+  unregisterManagedBackendPid(pid);
   eegBackendPid = null;
   const reason = options?.reason ? ` (${options.reason})` : "";
   return { ok: true, message: `Stopped EEG backend (pid ${pid})${reason}.` };
@@ -1482,18 +1756,19 @@ function launchEegBackendInBackground(): { ok: boolean; message: string } {
         detached: true,
         stdio: ["ignore", logFd, logFd],
       });
-      eegBackendPid = child.pid ?? null;
-      child.on("exit", () => {
-        if (eegBackendPid === child.pid) {
-          eegBackendPid = null;
-        }
+
+      const spawnedPid = child.pid ?? null;
+      eegBackendPid = spawnedPid;
+      eegAutoRestartArmedPid = null;
+      child.on("exit", (code, signal) => {
+        maybeAutoRestartEegBackend(spawnedPid, `code=${code ?? "null"} signal=${signal ?? "none"}`);
       });
-      child.on("error", () => {
-        if (eegBackendPid === child.pid) {
-          eegBackendPid = null;
-        }
+      child.on("error", error => {
+        maybeAutoRestartEegBackend(spawnedPid, `spawn-error=${error.message}`);
       });
       child.unref();
+      registerManagedBackendPid(spawnedPid);
+
       return {
         ok: true,
         message: `Launched EEG backend in background (pid ${child.pid ?? "unknown"}). Logs: ${logPath}`,
@@ -1507,29 +1782,158 @@ function launchEegBackendInBackground(): { ok: boolean; message: string } {
   }
 }
 
-async function startEegBackendAndWait(): Promise<{ ok: boolean; message: string }> {
+async function startEegBackendAndWait(options?: { autoRestart?: boolean }): Promise<{ ok: boolean; message: string }> {
+  eegStopRequested = false;
+  if (!options?.autoRestart) {
+    clearEegAutoRestartTimer();
+  }
+
+  const root = findProjectRoot(__dirname);
+  if (!root) {
+    return { ok: false, message: "Cannot find project root from Electron runtime path." };
+  }
+  const eegDir = path.join(root, "muse");
+  const pythonBin = resolvePythonBinary(eegDir);
+
+  const streamLaunch = launchMuseStreamInBackground(eegDir, pythonBin);
+  if (!streamLaunch.ok) {
+    return streamLaunch;
+  }
+
+  console.info(`[EEG] ${streamLaunch.message}`);
+  const streamReady = await waitForEegLslStream(eegDir, pythonBin, museStreamPid);
+  if (!streamReady) {
+    stopMuseStream({ force: true, reason: options?.autoRestart ? "auto-restart-timeout" : "startup-timeout" });
+    return {
+      ok: false,
+      message: "Muse stream did not become available for EEG before backend startup could continue.",
+    };
+  }
+
   const launch = launchEegBackendInBackground();
   if (!launch.ok) {
+    stopMuseStream({ force: true, reason: "backend-launch-failed" });
     return launch;
   }
 
-  const ready = await waitForEegBackendReady(30000, eegBackendPid);
+  const ready = await waitForEegBackendReady(0, eegBackendPid);
   if (!ready) {
-    stopEegBackend({ force: true, reason: "startup-timeout" });
+    stopEegBackend({ force: true, reason: options?.autoRestart ? "auto-restart-timeout" : "startup-timeout" });
     return {
       ok: false,
-      message: `EEG backend did not pass health checks on 127.0.0.1:${EEG_HTTP_PORT}${EEG_HEALTH_PATH} within 30s. ${launch.message}`.trim(),
+      message: `EEG backend did not confirm an active stream on 127.0.0.1:${EEG_HTTP_PORT}${EEG_HEALTH_PATH} after Muse stream startup. ${launch.message}`.trim(),
     };
+  }
+
+  if (eegBackendPid && isPidAlive(eegBackendPid)) {
+    eegAutoRestartArmedPid = eegBackendPid;
   }
   return launch;
 }
 
-function createWindow(mode: 'full' | 'overlay' = 'full') {
+function loadRendererContent(targetWindow: BrowserWindow, query?: Record<string, string>): void {
+  const isDev = !app.isPackaged;
+  if (isDev) {
+    const base = process.env.VITE_DEV_SERVER_URL || "http://localhost:5173";
+    const url = new URL(base);
+    if (query) {
+      for (const [key, value] of Object.entries(query)) {
+        url.searchParams.set(key, value);
+      }
+    }
+    void targetWindow.loadURL(url.toString());
+    return;
+  }
+
+  const indexPath = path.join(__dirname, "../index.html");
+  if (query && Object.keys(query).length > 0) {
+    void targetWindow.loadFile(indexPath, { query });
+    return;
+  }
+  void targetWindow.loadFile(indexPath);
+}
+
+function closeSnapOverlayWindow(): void {
+  const existing = snapOverlayWin;
+  snapOverlayWin = null;
+  if (!existing || existing.isDestroyed()) {
+    return;
+  }
+  existing.close();
+}
+
+function getVirtualDesktopBounds(): { x: number; y: number; width: number; height: number } {
+  const displays = screen.getAllDisplays();
+  if (!displays.length) {
+    return screen.getPrimaryDisplay().bounds;
+  }
+  let minX = displays[0].bounds.x;
+  let minY = displays[0].bounds.y;
+  let maxX = displays[0].bounds.x + displays[0].bounds.width;
+  let maxY = displays[0].bounds.y + displays[0].bounds.height;
+  for (let i = 1; i < displays.length; i += 1) {
+    const bounds = displays[i].bounds;
+    minX = Math.min(minX, bounds.x);
+    minY = Math.min(minY, bounds.y);
+    maxX = Math.max(maxX, bounds.x + bounds.width);
+    maxY = Math.max(maxY, bounds.y + bounds.height);
+  }
+  return {
+    x: minX,
+    y: minY,
+    width: Math.max(1, maxX - minX),
+    height: Math.max(1, maxY - minY),
+  };
+}
+
+function createSnapOverlayWindow(): void {
+  closeSnapOverlayWindow();
+
+  const { x, y, width, height } = getVirtualDesktopBounds();
+  const overlayWindow = new BrowserWindow({
+    x,
+    y,
+    width,
+    height,
+    frame: false,
+    transparent: true,
+    backgroundColor: "#00000000",
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    resizable: false,
+    movable: false,
+    focusable: false,
+    fullscreenable: false,
+    hasShadow: false,
+    webPreferences: {
+      preload: path.join(__dirname, "preload.js"),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  });
+  overlayWindow.setIgnoreMouseEvents(true, { forward: true });
+  overlayWindow.setAlwaysOnTop(true, "screen-saver");
+  if (process.platform === "darwin") {
+    overlayWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  }
+  loadRendererContent(overlayWindow, { snapOverlay: "1" });
+  overlayWindow.on("closed", () => {
+    if (snapOverlayWin === overlayWindow) {
+      snapOverlayWin = null;
+    }
+  });
+  snapOverlayWin = overlayWindow;
+}
+
+function createWindow(
+  mode: 'full' | 'overlay' = 'full',
+  options?: { targetPath?: string }
+) {
   const primaryDisplay = screen.getPrimaryDisplay();
-  const { width: screenWidth } = primaryDisplay.workAreaSize;
+  const { width: screenWidth, x: workAreaX, y: workAreaY } = primaryDisplay.workArea;
 
   console.log("Creating window with mode:", mode);
-  currentMode = mode; // Update the global state
 
   const commonOptions = {
     backgroundColor: "#0b0b0b",
@@ -1546,13 +1950,17 @@ function createWindow(mode: 'full' | 'overlay' = 'full') {
     win = new BrowserWindow({
       ...commonOptions,
       width: screenWidth,
-      height: 60,
-      x: 0,
-      y: 0,
+      height: 96,
+      x: workAreaX,
+      y: workAreaY,
       frame: false,
       transparent: true,
       alwaysOnTop: true,
       skipTaskbar: false,
+      minimizable: process.platform === "darwin" ? false : true,
+      maximizable: process.platform === "darwin" ? false : true,
+      closable: process.platform === "darwin" ? false : true,
+      fullscreenable: process.platform === "darwin" ? false : true,
       resizable: false,
       movable: true,
     });
@@ -1576,20 +1984,35 @@ function createWindow(mode: 'full' | 'overlay' = 'full') {
   if (!createdWindow) {
     return;
   }
+  currentMode = mode;
 
-  // Check if we're in development mode
-  const isDev = !app.isPackaged;
-  
-  if (isDev) {
-    createdWindow.loadURL('http://localhost:5173');
-    createdWindow.webContents.openDevTools({ mode: "detach" });
-  } else {
-    createdWindow.loadFile(path.join(__dirname, "../index.html"));
+  if (mode === "overlay" && process.platform === "darwin") {
+    createdWindow.setWindowButtonVisibility(false);
+    createdWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
   }
+
+  if (mode === "overlay") {
+    createdWindow.setAlwaysOnTop(true, "screen-saver");
+    createSnapOverlayWindow();
+    createdWindow.moveTop();
+  } else {
+    closeSnapOverlayWindow();
+  }
+
+  const normalizedTargetPath =
+    typeof options?.targetPath === "string" && options.targetPath.startsWith("/")
+      ? options.targetPath
+      : null;
+  const rendererQuery =
+    mode === "full" && normalizedTargetPath
+      ? { launchPath: normalizedTargetPath }
+      : undefined;
+  loadRendererContent(createdWindow, rendererQuery);
 
   createdWindow.on('closed', () => {
     if (win === createdWindow) {
       win = null;
+      closeSnapOverlayWindow();
     }
   });
 
@@ -1603,6 +2026,10 @@ function createWindow(mode: 'full' | 'overlay' = 'full') {
 
 // Toggle between overlay and full app mode
 ipcMain.handle("app:toggle-overlay", (event, args?: { targetPath?: string }) => {
+  if (isToggling) {
+    return currentMode === "overlay";
+  }
+
   const newMode: 'full' | 'overlay' = currentMode === 'overlay' ? 'full' : 'overlay';
   const willBeOverlay = newMode === 'overlay';
   const requestedTargetPath = args?.targetPath;
@@ -1620,12 +2047,23 @@ ipcMain.handle("app:toggle-overlay", (event, args?: { targetPath?: string }) => 
   const senderWindow = BrowserWindow.fromWebContents(event.sender);
   isToggling = true;
   try {
-    createWindow(newMode);
+    createWindow(newMode, { targetPath: requestedTargetPath });
     if (senderWindow && !senderWindow.isDestroyed()) {
-      senderWindow.destroy();
+      setTimeout(() => {
+        try {
+          if (!senderWindow.isDestroyed()) {
+            senderWindow.destroy();
+          }
+        } catch (error) {
+          console.warn("Failed to destroy previous window during overlay toggle:", error);
+        }
+      }, 0);
     }
     console.log("New window created, mode=", newMode);
     return willBeOverlay;
+  } catch (error) {
+    console.error("Overlay toggle failed:", error);
+    return currentMode === "overlay";
   } finally {
     isToggling = false;
   }
@@ -1673,6 +2111,10 @@ ipcMain.handle("cv:is-backend-running", async () => {
   } catch {
     return false;
   }
+});
+
+ipcMain.handle("cv:get-status-url", () => {
+  return `http://127.0.0.1:${CV_HTTP_PORT}/status`;
 });
 
 ipcMain.handle("voice:start-backend", async () => {
@@ -1732,7 +2174,8 @@ ipcMain.handle("eeg:stop-backend", () => {
 
 ipcMain.handle("eeg:is-backend-running", async () => {
   try {
-    return await probeEegBackendHealth(350);
+    const health = await probeEegBackendHealth(350);
+    return health.streamConnected;
   } catch {
     return false;
   }
@@ -1798,10 +2241,7 @@ app.on('window-all-closed', () => {
   if (isToggling) {
     return;
   }
-  stopCvBackend({ force: true, reason: "window-all-closed" });
-  stopVoiceBackend({ force: true, reason: "window-all-closed" });
-  stopSignBackend({ force: true, reason: "window-all-closed" });
-  stopEegBackend({ force: true, reason: "window-all-closed" });
+  stopAllBackends("window-all-closed");
   if (process.platform !== 'darwin') {
     app.quit();
   }
@@ -1809,8 +2249,25 @@ app.on('window-all-closed', () => {
 
 app.on("before-quit", () => {
   globalShortcut.unregisterAll();
-  stopCvBackend({ force: true, reason: "before-quit" });
-  stopVoiceBackend({ force: true, reason: "before-quit" });
-  stopSignBackend({ force: true, reason: "before-quit" });
-  stopEegBackend({ force: true, reason: "before-quit" });
+  closeSnapOverlayWindow();
+  stopAllBackends("before-quit");
+});
+
+app.on("quit", () => {
+  stopAllBackends("quit");
+});
+
+const shutdownSignals: Array<NodeJS.Signals> = ["SIGINT", "SIGTERM"];
+if (process.platform === "win32") {
+  shutdownSignals.push("SIGBREAK" as NodeJS.Signals);
+}
+for (const signal of shutdownSignals) {
+  process.once(signal, () => {
+    stopAllBackends(`signal:${signal}`);
+    app.quit();
+  });
+}
+
+process.once("exit", () => {
+  stopAllBackends("process-exit");
 });

@@ -15,7 +15,6 @@ import queue
 import os
 import subprocess
 import platform
-import requests
 import json
 import urllib
 import cv2
@@ -67,6 +66,7 @@ BAND_COLORS_BGR = {
 }
 
 state = 1
+eeg_stream_connected = False
 
 # ================================
 # Thread-safe frame store
@@ -145,10 +145,14 @@ def detect_backend():
 WAYLAND = detect_backend() == "wayland"
 
 def click(button="left"):
+    if button not in ("left", "right"):
+        print(f"  [SKIP] Unsupported button action requested: {button}")
+        return
+
     print(f"  >>> ACTION: {button} click")
     if WAYLAND:
-        codes = {"left": "0xC0", "right": "0xC2", "middle": "0xC1"}
-        subprocess.run(["ydotool", "click", codes[button]])
+        code = "0xC0" if button == "left" else "0xC2"
+        subprocess.run(["ydotool", "click", code])
     else:
         import pyautogui
         pyautogui.click(button=button)
@@ -681,6 +685,8 @@ def health():
         json.dumps({
             'service': 'muse-eeg-realtime',
             'port': STREAM_PORT,
+            'stream_connected': eeg_stream_connected,
+            'state': state,
             'endpoints': ['/topo', '/waves', '/combo', '/changestate', '/api/changestate']
         }),
         200,
@@ -829,6 +835,7 @@ class FeatureExtractor:
 # LSL Setup
 # ================================
 def setup_lsl_inlet(stream_type, timeout=10.0):
+    global eeg_stream_connected
     from pylsl import StreamInlet, resolve_byprop
     print(f"[LSL] Looking for a {stream_type} stream...")
     streams = resolve_byprop('type', stream_type, 1, timeout)
@@ -839,16 +846,19 @@ def setup_lsl_inlet(stream_type, timeout=10.0):
         )
     inlet = StreamInlet(streams[0], max_buflen=30)
     print(f"[LSL] {stream_type} stream connected.")
+    if stream_type.upper() == 'EEG':
+        eeg_stream_connected = True
     return inlet
 
 
 # ================================
 # Main EEG loop
 # ================================
-PRED_LABELS = {0: "IDLE", 1: "LEFT CLICK", 2: "RIGHT CLICK", 3: "ASL"}
+PRED_LABELS = {0: "IDLE", 1: "LEFT CLICK", 2: "RIGHT CLICK"}
 
 def main():
-    global state
+    global state, eeg_stream_connected
+    eeg_stream_connected = False
 
     if not os.path.exists('model.pkl'):
         raise RuntimeError("model.pkl not found. Train and save your model first.")
@@ -1011,7 +1021,6 @@ def main():
             continue
 
         # -- Fire action --
-        asl_state = 0
         if majority_prediction == 0:
             print("  [IDLE] No action.")
         if state:
@@ -1021,14 +1030,8 @@ def main():
             elif majority_prediction == 2:
                 click("right")
                 last_action_time = now
-            elif majority_prediction == 3:
-                asl_state = 1
-                last_action_time = now
-
-        try:
-            requests.post("http://localhost:8765", data={state: asl_state}, timeout=0.2)
-        except Exception:
-            pass
+            elif majority_prediction != 0:
+                print(f"  [SKIP] Unsupported class {majority_prediction}; no action fired.")
 
         consecutive_count  = 0
         pending_prediction = -1

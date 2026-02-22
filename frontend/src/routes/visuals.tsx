@@ -248,7 +248,6 @@ export default function Visualizations() {
   const fakeLevels = useMemo(
     () => ({
       left: { signal: 0.62 },
-      middle: { signal: 0.74 },
       right: { signal: 0.58 },
       jawClench: false,
     }),
@@ -289,7 +288,6 @@ export default function Visualizations() {
       {/* Sensor dots */}
       <motion.section style={styles.sensorDotsRow} variants={itemVariants}>
         <SensorDot label="Left" value={fakeLevels.left.signal} />
-        <SensorDot label="Middle" value={fakeLevels.middle.signal} />
         <SensorDot label="Right" value={fakeLevels.right.signal} />
         <JawDot active={fakeLevels.jawClench} />
       </motion.section>

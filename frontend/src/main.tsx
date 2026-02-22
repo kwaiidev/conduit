@@ -11,6 +11,38 @@ import Visuals from './routes/visuals';
 import { hasCompletedOnboarding } from './state/onboarding';
 import '../index.css';
 
+const isSnapOverlayQuery =
+  typeof window !== "undefined" &&
+  new URLSearchParams(window.location.search).get("snapOverlay") === "1";
+const launchPathQuery =
+  typeof window !== "undefined"
+    ? new URLSearchParams(window.location.search).get("launchPath")
+    : null;
+
+if (
+  !isSnapOverlayQuery &&
+  typeof window !== "undefined" &&
+  typeof launchPathQuery === "string" &&
+  launchPathQuery.startsWith("/") &&
+  launchPathQuery.length > 1
+) {
+  const requiresOnboarding = !hasCompletedOnboarding() && launchPathQuery !== "/onboarding";
+  const safeLaunchPath = requiresOnboarding ? "/onboarding" : launchPathQuery;
+  if (window.location.pathname !== safeLaunchPath || window.location.search) {
+    window.history.replaceState(null, "", safeLaunchPath);
+  }
+}
+
+if (isSnapOverlayQuery && typeof document !== "undefined") {
+  document.documentElement.style.background = "transparent";
+  document.body.style.background = "transparent";
+  document.body.style.margin = "0";
+  const root = document.getElementById("root");
+  if (root) {
+    root.style.background = "transparent";
+  }
+}
+
 // When we're in overlay mode, the window only shows the overlay bar (no router).
 // This runs before any route so the overlay window shows the bar instead of onboarding.
 const OverlayOnly: React.FC = () => (
@@ -53,7 +85,9 @@ const PendingRouteRedirect: React.FC = () => {
         return;
       }
       if (typeof targetPath === "string" && targetPath.startsWith("/")) {
-        navigate(targetPath, { replace: true });
+        const requiresOnboarding = !hasCompletedOnboarding() && targetPath !== "/onboarding";
+        const safeTargetPath = requiresOnboarding ? "/onboarding" : targetPath;
+        navigate(safeTargetPath, { replace: true });
       }
     });
 
@@ -92,8 +126,14 @@ const App: React.FC = () => {
               </ProtectedRoute>
             }
           />
-          <Route path="/" element={<Navigate to="/onboarding" replace />} />
-          <Route path="*" element={<Navigate to="/" replace />} />
+          <Route
+            path="/"
+            element={<Navigate to="/onboarding" replace />}
+          />
+          <Route
+            path="*"
+            element={<Navigate to="/onboarding" replace />}
+          />
         </Routes>
         <SnapCursorRoot />
       </BrowserRouter>
@@ -105,16 +145,24 @@ const App: React.FC = () => {
 
 // Decides whether to show overlay bar only (overlay window) or full app (router).
 const AppBoot: React.FC = () => {
+  const isSnapOverlayWindow = isSnapOverlayQuery;
   const [overlayMode, setOverlayMode] = useState<boolean | null>(null);
 
   useEffect(() => {
+    if (isSnapOverlayWindow) {
+      return;
+    }
     if (typeof window.electron?.getOverlayMode !== 'function') {
       setOverlayMode(false);
       return;
     }
     window.electron.getOverlayMode().then(setOverlayMode);
     window.electron?.onOverlayModeChanged?.(setOverlayMode);
-  }, []);
+  }, [isSnapOverlayWindow]);
+
+  if (isSnapOverlayWindow) {
+    return <SnapCursorLayer />;
+  }
 
   if (overlayMode === true) {
     return <OverlayOnly />;

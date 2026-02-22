@@ -10,6 +10,7 @@ contextBridge.exposeInMainWorld("electron", {
   startCvBackend: (args?: { camera?: number }) => ipcRenderer.invoke("cv:start-backend", args),
   stopCvBackend: () => ipcRenderer.invoke("cv:stop-backend"),
   isCvBackendRunning: () => ipcRenderer.invoke("cv:is-backend-running"),
+  getCvStatusUrl: () => ipcRenderer.invoke("cv:get-status-url"),
   startVoiceBackend: () => ipcRenderer.invoke("voice:start-backend"),
   stopVoiceBackend: () => ipcRenderer.invoke("voice:stop-backend"),
   isVoiceBackendRunning: () => ipcRenderer.invoke("voice:is-backend-running"),

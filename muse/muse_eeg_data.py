@@ -15,7 +15,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 # ================================
 # Configuration
 # ================================
-LABEL_MODE         = 3          # Set this before running: 0=idle, 1=left-click, 2=right-click, 3=other
+LABEL_MODE         = int(os.environ.get("EEG_LABEL_MODE", "0"))  # 0=idle, 1=left-click, 2=right-click
 SAMPLES_PER_WINDOW = 256        # 1 full second at 256 Hz — better frequency resolution
 WINDOW_STRIDE      = 64         # Slide window by 64 samples (75% overlap) — more training data
 STREAM_PORT        = int(os.environ.get("EEG_STREAM_PORT", "8770"))
@@ -203,6 +203,11 @@ def setup_lsl_inlet(stream_type='EEG', timeout=10.0):
 # ================================
 def main():
     global latest_frame
+
+    if LABEL_MODE not in (0, 1, 2):
+        raise RuntimeError(
+            f"Unsupported EEG_LABEL_MODE={LABEL_MODE}. Supported labels: 0=idle, 1=left-click, 2=right-click."
+        )
 
     start_mjpeg_server()
 

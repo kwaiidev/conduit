@@ -7,6 +7,7 @@ export default function CompactToolbar() {
     const navigate = useNavigate();
     const { isDark, toggleTheme } = useTheme();
     const [isOverlay, setIsOverlay] = useState(false);
+    const [isTogglingOverlay, setIsTogglingOverlay] = useState(false);
     useEffect(() => {
         // Get initial overlay mode
         window.electron?.getOverlayMode().then(setIsOverlay);
@@ -16,18 +17,37 @@ export default function CompactToolbar() {
         });
     }, []);
     const toggleOverlay = async () => {
-        const newMode = await window.electron?.toggleOverlay();
-        if (newMode !== undefined) {
-            setIsOverlay(newMode);
+        if (isTogglingOverlay) {
+            return;
+        }
+        if (typeof window.electron?.toggleOverlay !== "function") {
+            console.error("Overlay toggle is unavailable in this runtime.");
+            return;
+        }
+        setIsTogglingOverlay(true);
+        try {
+            const newMode = await window.electron.toggleOverlay();
+            if (typeof newMode === "boolean") {
+                setIsOverlay(newMode);
+            }
+        }
+        catch (error) {
+            console.error("Overlay toggle failed:", error);
+        }
+        finally {
+            setIsTogglingOverlay(false);
         }
     };
     return (_jsxs("div", { className: "app-title-bar", style: {
             ...styles.toolbar,
             background: "var(--toolbar-bg)",
             borderBottomColor: "var(--toolbar-border)",
-        }, children: [_jsx("div", { style: styles.left, className: "app-drag-region", children: _jsx("span", { style: { ...styles.logo, color: "var(--toolbar-text)" }, children: "Conduit" }) }), _jsxs("div", { style: styles.center, className: "app-drag-region", children: [_jsx(ToolbarButton, { active: false, onClick: () => navigate("/home"), label: "Home", icon: Home }), _jsx(ToolbarButton, { active: false, onClick: () => navigate("/visuals"), label: "Visuals", icon: BarChart3 })] }), _jsxs("div", { style: styles.right, className: "app-no-drag", children: [_jsx("button", { onClick: () => window.electron?.minimize(), style: styles.windowButton, title: "Minimize", children: _jsx(Minus, { size: 14 }) }), _jsx("button", { onClick: () => window.electron?.maximize(), style: styles.windowButton, title: "Maximize", children: _jsx(Square, { size: 14 }) }), _jsx("button", { onClick: () => window.electron?.close(), style: styles.closeButton, title: "Close", children: _jsx(X, { size: 14 }) }), _jsx("button", { onClick: toggleTheme, style: styles.windowButton, title: isDark ? "Switch to light mode" : "Switch to dark mode", children: isDark ? _jsx(Sun, { size: 16 }) : _jsx(Moon, { size: 16 }) }), _jsxs("button", { onClick: toggleOverlay, style: styles.overlayButton, title: isOverlay ? "Exit overlay mode" : "Enter overlay mode", children: [isOverlay ? _jsx(Maximize2, { size: 16 }) : _jsx(Minimize2, { size: 16 }), _jsx("span", { children: isOverlay ? "Expand" : "Overlay" })] })] })] }));
+        }, children: [_jsx("div", { style: styles.left, className: "app-drag-region", children: _jsx("span", { style: { ...styles.logo, color: "var(--toolbar-text)" }, children: "Conduit" }) }), _jsxs("div", { style: styles.center, className: "app-drag-region", children: [_jsx(ToolbarButton, { active: false, onClick: () => navigate("/home"), label: "Home", icon: Home }), _jsx(ToolbarButton, { active: false, onClick: () => navigate("/visuals"), label: "Visuals", icon: BarChart3 })] }), _jsxs("div", { style: styles.right, className: "app-no-drag", children: [_jsx("button", { type: "button", onClick: () => window.electron?.minimize(), style: styles.windowButton, title: "Minimize", children: _jsx(Minus, { size: 14 }) }), _jsx("button", { type: "button", onClick: () => window.electron?.maximize(), style: styles.windowButton, title: "Maximize", children: _jsx(Square, { size: 14 }) }), _jsx("button", { type: "button", onClick: () => window.electron?.close(), style: styles.closeButton, title: "Close", children: _jsx(X, { size: 14 }) }), _jsx("button", { type: "button", onClick: toggleTheme, style: styles.windowButton, title: isDark ? "Switch to light mode" : "Switch to dark mode", children: isDark ? _jsx(Sun, { size: 16 }) : _jsx(Moon, { size: 16 }) }), _jsxs("button", { type: "button", onClick: toggleOverlay, style: {
+                            ...styles.overlayButton,
+                            ...(isTogglingOverlay ? styles.overlayButtonDisabled : {}),
+                        }, title: isTogglingOverlay ? "Switching overlay mode..." : isOverlay ? "Exit overlay mode" : "Enter overlay mode", disabled: isTogglingOverlay, children: [isOverlay ? _jsx(Maximize2, { size: 16 }) : _jsx(Minimize2, { size: 16 }), _jsx("span", { children: isTogglingOverlay ? "Switching..." : isOverlay ? "Expand" : "Overlay" })] })] })] }));
 }
-const ToolbarButton = ({ active, onClick, label, icon: Icon, color }) => (_jsxs("button", { onClick: onClick, style: {
+const ToolbarButton = ({ active, onClick, label, icon: Icon, color }) => (_jsxs("button", { type: "button", onClick: onClick, style: {
         ...styles.button,
         ...(active ? styles.buttonActive : {}),
         ...(color ? { color } : {}),
@@ -93,6 +113,10 @@ const styles = {
         fontSize: 13,
         fontWeight: 600,
         transition: "all 0.2s",
+    },
+    overlayButtonDisabled: {
+        opacity: 0.7,
+        cursor: "wait",
     },
     windowButton: {
         display: "flex",

@@ -85,7 +85,7 @@ function describeCameraStatus(raw) {
     }
     return raw.replace(/_/g, " ");
 }
-export function CVCursorCalibrationCenter() {
+export function CVCursorCalibrationCenter({ autoStart = false, onCenterLocked, onCalibrationStateChange, } = {}) {
     const [isCalibrating, setIsCalibrating] = React.useState(false);
     const [backendReachable, setBackendReachable] = React.useState(false);
     const [isOnCenter, setIsOnCenter] = React.useState(false);
@@ -97,9 +97,12 @@ export function CVCursorCalibrationCenter() {
     const [lastFrameLoadMs, setLastFrameLoadMs] = React.useState(0);
     const [centerLockProgress, setCenterLockProgress] = React.useState(0);
     const refreshCooldownRef = React.useRef(0);
-    const lastBackendFrameMsRef = React.useRef(0);
+    const lastBackendFrameMarkerRef = React.useRef(null);
+    const lastBackendFrameObservedAtMsRef = React.useRef(0);
     const centerReadySinceMsRef = React.useRef(null);
     const statusErrorStreakRef = React.useRef(0);
+    const autoStartAttemptedRef = React.useRef(false);
+    const centerLockNotifiedRef = React.useRef(false);
     const refreshStream = React.useCallback((reason) => {
         const now = Date.now();
         if (now - refreshCooldownRef.current < 700) {
@@ -121,8 +124,10 @@ export function CVCursorCalibrationCenter() {
         setLastFrameLoadMs(0);
         setCenterLockProgress(0);
         centerReadySinceMsRef.current = null;
+        centerLockNotifiedRef.current = false;
         statusErrorStreakRef.current = 0;
-        lastBackendFrameMsRef.current = 0;
+        lastBackendFrameMarkerRef.current = null;
+        lastBackendFrameObservedAtMsRef.current = 0;
         let launchDebugMessage = "";
         try {
             setStatusMessage("Launching CV backend...");
@@ -162,6 +167,7 @@ export function CVCursorCalibrationCenter() {
         setStatusMessage("Calibration paused.");
         setCenterLockProgress(0);
         centerReadySinceMsRef.current = null;
+        centerLockNotifiedRef.current = false;
         statusErrorStreakRef.current = 0;
         try {
             await setCvState({
@@ -187,7 +193,11 @@ export function CVCursorCalibrationCenter() {
                 }
                 statusErrorStreakRef.current = 0;
                 if (typeof payload.camera_last_valid_frame_ms === "number") {
-                    lastBackendFrameMsRef.current = payload.camera_last_valid_frame_ms;
+                    const marker = payload.camera_last_valid_frame_ms;
+                    if (marker !== lastBackendFrameMarkerRef.current) {
+                        lastBackendFrameMarkerRef.current = marker;
+                        lastBackendFrameObservedAtMsRef.current = Date.now();
+                    }
                 }
                 const cameraReady = Boolean(payload.camera_ready);
                 if (cameraReady) {
@@ -199,7 +209,9 @@ export function CVCursorCalibrationCenter() {
                         return;
                     }
                     const nowMs = Date.now();
-                    const backendFrameAge = nowMs - (lastBackendFrameMsRef.current || nowMs);
+                    const backendFrameAge = lastBackendFrameObservedAtMsRef.current > 0
+                        ? nowMs - lastBackendFrameObservedAtMsRef.current
+                        : 0;
                     if (backendFrameAge > 1800) {
                         centerReadySinceMsRef.current = null;
                         setCenterLockProgress(0);
@@ -341,7 +353,29 @@ export function CVCursorCalibrationCenter() {
         return () => window.clearInterval(timer);
     }, [isCalibrating, backendReachable, lastFrameLoadMs, refreshStream]);
     const showOverlay = isCalibrating && (phase !== "ready" || !backendReachable);
-    return (_jsxs("div", { style: styles.container, children: [_jsx("div", { style: styles.headerBlock, children: _jsx("p", { style: styles.subtitle, children: "Keep your face centered. Press C anytime during this step to request center calibration." }) }), _jsx("div", { style: styles.previewCard, children: _jsxs("div", { style: styles.previewInner, children: [isCalibrating && backendReachable ? (_jsxs(_Fragment, { children: [_jsx("img", { src: `${CV_API_BASE}/video?nonce=${streamNonce}&attempt=${streamAttempt}`, alt: "Live camera preview for eye calibration", style: styles.previewImage, draggable: false, onLoad: () => setLastFrameLoadMs(Date.now()), onError: () => {
+    React.useEffect(() => {
+        if (!autoStart || autoStartAttemptedRef.current) {
+            return;
+        }
+        autoStartAttemptedRef.current = true;
+        void startCalibration();
+    }, [autoStart]);
+    React.useEffect(() => {
+        if (!centerLocked || centerLockNotifiedRef.current) {
+            return;
+        }
+        centerLockNotifiedRef.current = true;
+        onCenterLocked?.();
+    }, [centerLocked, onCenterLocked]);
+    React.useEffect(() => {
+        onCalibrationStateChange?.(isCalibrating && !centerLocked);
+    }, [isCalibrating, centerLocked, onCalibrationStateChange]);
+    React.useEffect(() => {
+        return () => {
+            onCalibrationStateChange?.(false);
+        };
+    }, [onCalibrationStateChange]);
+    return (_jsxs("div", { style: styles.container, children: [_jsx("div", { style: styles.headerBlock, children: _jsx("p", { style: styles.subtitle, children: "Keep your face centered. Press C anytime to re-center." }) }), _jsx("div", { style: styles.previewCard, children: _jsxs("div", { style: styles.previewInner, children: [isCalibrating && backendReachable ? (_jsxs(_Fragment, { children: [_jsx("img", { src: `${CV_API_BASE}/video?nonce=${streamNonce}&attempt=${streamAttempt}`, alt: "Live camera preview for eye calibration", style: styles.previewImage, draggable: false, onLoad: () => setLastFrameLoadMs(Date.now()), onError: () => {
                                         refreshStream("Camera stream disconnected. Reconnecting...");
                                     } }), showOverlay ? (_jsxs("div", { style: styles.statusOverlay, children: [_jsx(motion.span, { style: styles.statusDot, animate: { scale: [1, 1.25, 1], opacity: [1, 0.55, 1] }, transition: { duration: 1.1, repeat: Infinity } }), _jsx("span", { style: styles.statusOverlayText, children: statusMessage })] })) : null] })) : (_jsxs(_Fragment, { children: [_jsx("div", { style: styles.previewPlaceholder }), _jsx("div", { style: styles.placeholderText, children: isCalibrating ? "Launching camera backend..." : "Camera preview appears after Start." })] })), _jsxs("div", { style: styles.target, children: [_jsx("div", { style: {
                                         ...styles.targetProgress,
@@ -359,13 +393,13 @@ export function CVCursorCalibrationCenter() {
 }
 const BUTTON_WIDTH = 180;
 const BUTTON_HEIGHT = 42;
-const PREVIEW_WIDTH = 520;
+const PREVIEW_WIDTH = 500;
 const styles = {
     container: {
         display: "flex",
         flexDirection: "column",
         alignItems: "center",
-        gap: 16,
+        gap: 12,
         width: "100%",
     },
     headerBlock: {
@@ -373,19 +407,19 @@ const styles = {
         textAlign: "center",
     },
     subtitle: {
-        margin: "8px 0 0 0",
-        fontSize: 14,
+        margin: "4px 0 0 0",
+        fontSize: 13,
         color: "var(--text-secondary)",
     },
     previewCard: {
         width: PREVIEW_WIDTH,
-        borderRadius: 20,
+        borderRadius: 18,
         border: "1px solid var(--border)",
         background: "var(--bg-secondary)",
-        padding: 16,
+        padding: 14,
     },
     previewInner: {
-        height: 280,
+        height: 220,
         borderRadius: 16,
         border: "1px solid var(--border)",
         background: "radial-gradient(circle at 20% 20%, rgba(0,194,170,0.15), transparent 50%), radial-gradient(circle at 80% 20%, rgba(0,122,255,0.13), transparent 48%), #0f1620",
@@ -421,7 +455,7 @@ const styles = {
         left: 12,
         right: 12,
         top: 12,
-        minHeight: 42,
+        minHeight: 38,
         borderRadius: 12,
         background: "rgba(10, 15, 20, 0.82)",
         border: "1px solid rgba(255,255,255,0.15)",
@@ -429,7 +463,7 @@ const styles = {
         display: "flex",
         alignItems: "center",
         gap: 10,
-        padding: "10px 12px",
+        padding: "8px 10px",
         zIndex: 2,
     },
     statusOverlayText: {
@@ -527,8 +561,8 @@ const styles = {
     },
     statusText: {
         margin: 0,
-        minHeight: 22,
-        fontSize: 13,
+        minHeight: 20,
+        fontSize: 12,
         color: "var(--text-secondary)",
         textAlign: "center",
         width: PREVIEW_WIDTH,

@@ -7,6 +7,7 @@ export default function CompactToolbar() {
   const navigate = useNavigate();
   const { isDark, toggleTheme } = useTheme();
   const [isOverlay, setIsOverlay] = useState(false);
+  const [isTogglingOverlay, setIsTogglingOverlay] = useState(false);
 
   useEffect(() => {
     // Get initial overlay mode
@@ -19,9 +20,24 @@ export default function CompactToolbar() {
   }, []);
 
   const toggleOverlay = async () => {
-    const newMode = await window.electron?.toggleOverlay();
-    if (newMode !== undefined) {
-      setIsOverlay(newMode);
+    if (isTogglingOverlay) {
+      return;
+    }
+    if (typeof window.electron?.toggleOverlay !== "function") {
+      console.error("Overlay toggle is unavailable in this runtime.");
+      return;
+    }
+
+    setIsTogglingOverlay(true);
+    try {
+      const newMode = await window.electron.toggleOverlay();
+      if (typeof newMode === "boolean") {
+        setIsOverlay(newMode);
+      }
+    } catch (error) {
+      console.error("Overlay toggle failed:", error);
+    } finally {
+      setIsTogglingOverlay(false);
     }
   };
 
@@ -56,6 +72,7 @@ export default function CompactToolbar() {
       <div style={styles.right} className="app-no-drag">
         {/* Window controls */}
         <button
+          type="button"
           onClick={() => window.electron?.minimize()}
           style={styles.windowButton}
           title="Minimize"
@@ -63,6 +80,7 @@ export default function CompactToolbar() {
           <Minus size={14} />
         </button>
         <button
+          type="button"
           onClick={() => window.electron?.maximize()}
           style={styles.windowButton}
           title="Maximize"
@@ -70,6 +88,7 @@ export default function CompactToolbar() {
           <Square size={14} />
         </button>
         <button
+          type="button"
           onClick={() => window.electron?.close()}
           style={styles.closeButton}
           title="Close"
@@ -79,6 +98,7 @@ export default function CompactToolbar() {
 
         {/* Theme toggle */}
         <button
+          type="button"
           onClick={toggleTheme}
           style={styles.windowButton}
           title={isDark ? "Switch to light mode" : "Switch to dark mode"}
@@ -88,12 +108,17 @@ export default function CompactToolbar() {
 
         {/* Overlay toggle */}
         <button
+          type="button"
           onClick={toggleOverlay}
-          style={styles.overlayButton}
-          title={isOverlay ? "Exit overlay mode" : "Enter overlay mode"}
+          style={{
+            ...styles.overlayButton,
+            ...(isTogglingOverlay ? styles.overlayButtonDisabled : {}),
+          }}
+          title={isTogglingOverlay ? "Switching overlay mode..." : isOverlay ? "Exit overlay mode" : "Enter overlay mode"}
+          disabled={isTogglingOverlay}
         >
           {isOverlay ? <Maximize2 size={16} /> : <Minimize2 size={16} />}
-          <span>{isOverlay ? "Expand" : "Overlay"}</span>
+          <span>{isTogglingOverlay ? "Switching..." : isOverlay ? "Expand" : "Overlay"}</span>
         </button>
       </div>
     </div>
@@ -108,6 +133,7 @@ const ToolbarButton: React.FC<{
   color?: string;
 }> = ({ active, onClick, label, icon: Icon, color }) => (
   <button
+    type="button"
     onClick={onClick}
     style={{
       ...styles.button,
@@ -181,6 +207,10 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: 13,
     fontWeight: 600,
     transition: "all 0.2s",
+  },
+  overlayButtonDisabled: {
+    opacity: 0.7,
+    cursor: "wait",
   },
   windowButton: {
     display: "flex",

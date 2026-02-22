@@ -2,6 +2,14 @@ import React from "react";
 import { enableASL, getASLReady } from "../../lib/aslcv";
 
 const ASL_VIDEO_URL = "http://localhost:8765/video";
+const SIGN_TEXT_PREFERENCE_KEY = "conduit-modality-intent-sign-text";
+
+function setModalityPreference(enabled: boolean): void {
+  if (typeof window === "undefined" || !window.localStorage) {
+    return;
+  }
+  localStorage.setItem(SIGN_TEXT_PREFERENCE_KEY, enabled ? "1" : "0");
+}
 
 type HealthState = {
   signBackend: boolean;
@@ -39,7 +47,6 @@ export function ASLVisualsCheckStep() {
   const [isStartingCv, setIsStartingCv] = React.useState(false);
   const [videoError, setVideoError] = React.useState(false);
   const [videoNonce, setVideoNonce] = React.useState(() => Date.now());
-  const autoEnableAttemptedRef = React.useRef(false);
 
   const probeStatus = React.useCallback(async (silent = false): Promise<HealthState> => {
     const [signBackend, cvBackend] = await Promise.all([
@@ -50,18 +57,6 @@ export function ASLVisualsCheckStep() {
     let aslReady = false;
     if (signBackend) {
       aslReady = await getASLReady();
-      if (!aslReady && !autoEnableAttemptedRef.current) {
-        autoEnableAttemptedRef.current = true;
-        try {
-          await enableASL();
-          await sleep(250);
-          aslReady = await getASLReady();
-        } catch {
-          // Keep probing; startup path surfaces actionable errors.
-        }
-      }
-    } else {
-      autoEnableAttemptedRef.current = false;
     }
 
     const nextHealth = { signBackend, aslReady, cvBackend };
@@ -84,7 +79,6 @@ export function ASLVisualsCheckStep() {
 
       setStatusMessage("Enabling ASL detection and session...");
       await enableASL();
-      autoEnableAttemptedRef.current = true;
 
       const deadline = Date.now() + 12000;
       let ready = false;
@@ -95,6 +89,7 @@ export function ASLVisualsCheckStep() {
         }
         await sleep(400);
       }
+      setModalityPreference(ready);
 
       const nextHealth = await probeStatus(true);
       if (ready && nextHealth.cvBackend) {
@@ -109,6 +104,7 @@ export function ASLVisualsCheckStep() {
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       setStatusMessage(`ASL startup failed: ${detail}`);
+      setModalityPreference(false);
     } finally {
       setIsStartingAsl(false);
     }
@@ -163,9 +159,6 @@ export function ASLVisualsCheckStep() {
         <h3 style={styles.title}>ASL + Eye-Gaze Validation</h3>
         <p style={styles.description}>
           This step starts the sign backend, enables ASL inference, and checks whether eye-gaze CV is online too.
-        </p>
-        <p style={styles.description}>
-          ASL activation sends <code>POST /changestate?state=1</code> and <code>POST /sessionstate?state=1</code>.
         </p>
 
         <div style={styles.badgeRow}>
@@ -248,14 +241,15 @@ const styles: Record<string, React.CSSProperties> = {
     width: "100%",
   },
   card: {
-    width: 620,
-    borderRadius: 20,
+    width: "100%",
+    maxWidth: 520,
+    borderRadius: 18,
     border: "1px solid var(--border)",
     background: "var(--bg-secondary)",
-    padding: 20,
+    padding: 18,
     display: "flex",
     flexDirection: "column",
-    gap: 12,
+    gap: 10,
   },
   title: {
     margin: 0,
@@ -325,14 +319,14 @@ const styles: Record<string, React.CSSProperties> = {
     border: "1px solid var(--border)",
     background: "var(--bg-tertiary)",
     overflow: "hidden",
-    minHeight: 240,
+    minHeight: 184,
     display: "grid",
     placeItems: "center",
   },
   previewImage: {
     width: "100%",
     height: "100%",
-    minHeight: 240,
+    minHeight: 184,
     objectFit: "cover",
     display: "block",
   },

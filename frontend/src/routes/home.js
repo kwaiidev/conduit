@@ -1,11 +1,42 @@
 import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
-import { useState, useEffect } from "react";
+import React, { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { enableASL, disableASL, getASLReady } from "../lib/aslcv";
 import { enableVoice, disableVoice, getVoiceReady } from "../lib/voicetts";
 import { enableEEG, disableEEG } from "../lib/eeg";
+import { enableCvCursorControl, disableCvCursorControl, getCvReady } from "../lib/cv";
+import { CVCursorCalibrationCenter } from "./onboarding/cvcalibrate";
 import { motion } from "motion/react";
 import { MousePointer2, Zap, Type, Activity, Eye, Mic, ArrowRight } from "lucide-react";
+const CV_POINTER_PREFERENCE_KEY = "conduit-modality-intent-cv-pointer";
+const SIGN_TEXT_PREFERENCE_KEY = "conduit-modality-intent-sign-text";
+function getModalityPreference(key) {
+    if (typeof window === "undefined" || !window.localStorage) {
+        return null;
+    }
+    const value = localStorage.getItem(key);
+    if (value === null) {
+        return null;
+    }
+    return value === "1";
+}
+function setModalityPreference(key, enabled) {
+    if (typeof window === "undefined" || !window.localStorage) {
+        return;
+    }
+    localStorage.setItem(key, enabled ? "1" : "0");
+}
+function shouldActivateByIntent(featureId, backendReady) {
+    if (featureId === "cv-pointer") {
+        const preference = getModalityPreference(CV_POINTER_PREFERENCE_KEY);
+        return preference === null ? false : preference && backendReady;
+    }
+    if (featureId === "sign-text") {
+        const preference = getModalityPreference(SIGN_TEXT_PREFERENCE_KEY);
+        return preference === null ? false : preference && backendReady;
+    }
+    return backendReady;
+}
 const containerVariants = {
     hidden: { opacity: 0 },
     visible: {
@@ -23,22 +54,62 @@ const itemVariants = {
 };
 export default function Home() {
     const nav = useNavigate();
-    const [activeModes, setActiveModes] = useState(['cv-pointer', 'eeg-select']);
+    const [activeModes, setActiveModes] = useState([]);
+    const [showCvCenterCalibration, setShowCvCenterCalibration] = useState(false);
     // Sync voice and sign toggles with real API state on mount
     useEffect(() => {
         const sync = (id, ready) => {
-            setActiveModes((prev) => ready
+            setActiveModes((prev) => shouldActivateByIntent(id, ready)
                 ? prev.includes(id) ? prev : [...prev, id]
                 : prev.filter((m) => m !== id));
         };
+        getCvReady().then((ready) => sync('cv-pointer', ready));
         getVoiceReady().then((ready) => sync('voice-text', ready));
         getASLReady().then((ready) => sync('sign-text', ready));
+    }, []);
+    useEffect(() => {
+        if (showCvCenterCalibration) {
+            document.documentElement.setAttribute("data-snap-modal-open", "true");
+        }
+        else {
+            document.documentElement.removeAttribute("data-snap-modal-open");
+        }
+        return () => {
+            document.documentElement.removeAttribute("data-snap-modal-open");
+        };
+    }, [showCvCenterCalibration]);
+    const closeCvCalibration = React.useCallback(async () => {
+        setShowCvCenterCalibration(false);
+        try {
+            await enableCvCursorControl();
+        }
+        catch (error) {
+            console.error("CV enable after closing calibration modal failed:", error);
+            setActiveModes((prev) => prev.filter((id) => id !== 'cv-pointer'));
+            setModalityPreference(CV_POINTER_PREFERENCE_KEY, false);
+            await disableCvCursorControl();
+        }
+    }, []);
+    const handleCvCalibrationLocked = React.useCallback(() => {
+        void (async () => {
+            try {
+                await enableCvCursorControl();
+                setShowCvCenterCalibration(false);
+            }
+            catch (error) {
+                console.error("CV re-enable after calibration failed:", error);
+                setShowCvCenterCalibration(false);
+                setActiveModes((prev) => prev.filter((id) => id !== 'cv-pointer'));
+                setModalityPreference(CV_POINTER_PREFERENCE_KEY, false);
+                await disableCvCursorControl();
+            }
+        })();
     }, []);
     const featureGroups = [
         {
             title: "Pointer Control",
             features: [
-                { id: 'cv-pointer', icon: _jsx(MousePointer2, { size: 20 }), name: "CV Cursor", description: "Head/eye movement control" },
+                { id: 'cv-pointer', icon: _jsx(MousePointer2, { size: 20 }), name: "CV Cursor", description: "Eye movement control" },
             ]
         },
         {
@@ -59,7 +130,7 @@ export default function Home() {
         nav("/onboarding", { state: { startStep: 1 } });
     };
     const quickStartSteps = [
-        "Use the toggles below to enable the modalities you want to control right now.",
+        "Use the toggles above to enable the modalities you want to control right now.",
         "Keep your webcam view clear and your EEG headset steady for stable confidence scores.",
         "Use voice for explicit commands, gaze for continuous cursor movement, EEG for selection, and ASL for text input.",
         "If control quality drops, rerun training with Train EEG Signals and recalibrate from onboarding.",
@@ -98,6 +169,29 @@ export default function Home() {
         const next = !isCurrentlyActive;
         // Optimistically update UI
         setActiveModes((prev) => next ? [...prev, featureId] : prev.filter((id) => id !== featureId));
+        if (featureId === 'cv-pointer') {
+            setModalityPreference(CV_POINTER_PREFERENCE_KEY, next);
+        }
+        if (featureId === 'sign-text') {
+            setModalityPreference(SIGN_TEXT_PREFERENCE_KEY, next);
+        }
+        if (featureId === 'cv-pointer') {
+            if (next) {
+                setShowCvCenterCalibration(true);
+            }
+            else {
+                setShowCvCenterCalibration(false);
+                try {
+                    await disableCvCursorControl();
+                }
+                catch (error) {
+                    console.error("CV disable failed:", error);
+                    setActiveModes((prev) => isCurrentlyActive ? [...prev, featureId] : prev.filter((id) => id !== featureId));
+                    setModalityPreference(CV_POINTER_PREFERENCE_KEY, isCurrentlyActive);
+                }
+            }
+            return;
+        }
         if (featureId === 'eeg-select') {
             try {
                 if (next) {
@@ -122,15 +216,27 @@ export default function Home() {
                 }
                 else {
                     await disable();
+                    if (featureId === 'sign-text') {
+                        setModalityPreference(SIGN_TEXT_PREFERENCE_KEY, false);
+                    }
                 }
             }
             catch (e) {
                 console.error(`${featureId} toggle failed:`, e);
                 setActiveModes((prev) => isCurrentlyActive ? [...prev, featureId] : prev.filter((id) => id !== featureId));
+                if (featureId === 'sign-text') {
+                    setModalityPreference(SIGN_TEXT_PREFERENCE_KEY, isCurrentlyActive);
+                }
             }
         }
     };
-    return (_jsxs(motion.div, { style: styles.container, variants: containerVariants, initial: "hidden", animate: "visible", children: [_jsxs(motion.section, { style: styles.header, className: "home-header", variants: itemVariants, children: [_jsxs("div", { style: styles.headerContent, children: [_jsxs(motion.div, { style: styles.statusBadge, animate: { opacity: [1, 0.7, 1] }, transition: { duration: 2, repeat: Infinity, ease: "easeInOut" }, children: [_jsx(motion.div, { style: styles.statusDot, animate: { scale: [1, 1.2, 1], opacity: [1, 0.6, 1] }, transition: { duration: 1.5, repeat: Infinity, ease: "easeInOut" } }), "System Operational"] }), _jsxs("h1", { style: styles.title, className: "home-title", children: ["Welcome back, ", _jsx("span", { style: styles.titleAccent, children: "User" })] })] }), _jsxs(motion.button, { onClick: handleRetrainEEG, style: styles.retrainButton, className: "home-retrain-button", whileHover: { scale: 1.05 }, whileTap: { scale: 0.98 }, children: [_jsx(Zap, { size: 18 }), "Train EEG Signals", _jsx(ArrowRight, { size: 16 })] })] }), _jsxs(motion.section, { style: styles.instructionsPanel, variants: itemVariants, children: [_jsxs("div", { style: styles.instructionsHeader, children: [_jsx("span", { style: styles.instructionsEyebrow, children: "Start Here" }), _jsx("h2", { style: styles.instructionsTitle, children: "Why Conduit exists and how to use it" }), _jsx("p", { style: styles.instructionsLead, children: "Conduit is built to give full computer access to people who cannot rely on conventional mouse and keyboard input. It translates gaze, EEG, voice, and sign signals into a shared canonical control event format so the system can safely fuse them in real time." })] }), _jsxs("div", { style: styles.instructionsGrid, children: [_jsxs("article", { style: styles.instructionsCard, children: [_jsx("h3", { style: styles.instructionsCardTitle, children: "Quick Start Flow" }), _jsx("ol", { style: styles.instructionsList, children: quickStartSteps.map((step) => (_jsx("li", { style: styles.instructionsListItem, children: step }, step))) })] }), _jsxs("article", { style: styles.instructionsCard, children: [_jsx("h3", { style: styles.instructionsCardTitle, children: "Modality Guide" }), _jsx("div", { style: styles.modalityList, children: modalityGuide.map((item) => (_jsxs("div", { style: styles.modalityItem, children: [_jsx("div", { style: styles.modalityIcon, children: item.icon }), _jsxs("div", { style: styles.modalityContent, children: [_jsx("span", { style: styles.modalityName, children: item.name }), _jsx("p", { style: styles.modalityHint, children: item.hint })] })] }, item.name))) })] }), _jsxs("article", { style: styles.instructionsCard, children: [_jsx("h3", { style: styles.instructionsCardTitle, children: "Data + Safety Contract" }), _jsx("ul", { style: styles.instructionsList, children: architectureGuidance.map((point) => (_jsx("li", { style: styles.instructionsListItem, children: point }, point))) })] })] })] }), _jsx(motion.div, { style: styles.grid, variants: containerVariants, children: featureGroups.map((group) => (_jsxs(motion.div, { style: styles.group, variants: itemVariants, children: [_jsx("h2", { style: styles.groupTitle, children: group.title }), _jsx("div", { style: styles.featuresList, children: group.features.map((feature) => {
+    return (_jsxs(motion.div, { style: styles.container, variants: containerVariants, initial: "hidden", animate: "visible", children: [_jsxs(motion.section, { style: {
+                    ...styles.header,
+                    ...(showCvCenterCalibration ? styles.blockedInteractiveLayer : {}),
+                }, className: "home-header", variants: itemVariants, "data-snap-ignore": showCvCenterCalibration ? "true" : undefined, "aria-hidden": showCvCenterCalibration ? true : undefined, children: [_jsxs("div", { style: styles.headerContent, children: [_jsxs(motion.div, { style: styles.statusBadge, animate: { opacity: [1, 0.7, 1] }, transition: { duration: 2, repeat: Infinity, ease: "easeInOut" }, children: [_jsx(motion.div, { style: styles.statusDot, animate: { scale: [1, 1.2, 1], opacity: [1, 0.6, 1] }, transition: { duration: 1.5, repeat: Infinity, ease: "easeInOut" } }), "System Operational"] }), _jsxs("h1", { style: styles.title, className: "home-title", children: ["Welcome back, ", _jsx("span", { style: styles.titleAccent, children: "User" })] })] }), _jsxs(motion.button, { onClick: handleRetrainEEG, style: styles.retrainButton, className: "home-retrain-button", whileHover: { scale: 1.05 }, whileTap: { scale: 0.98 }, children: [_jsx(Zap, { size: 18 }), "Train EEG Signals", _jsx(ArrowRight, { size: 16 })] })] }), _jsx(motion.div, { style: {
+                    ...styles.grid,
+                    ...(showCvCenterCalibration ? styles.blockedInteractiveLayer : {}),
+                }, variants: containerVariants, "data-snap-ignore": showCvCenterCalibration ? "true" : undefined, "aria-hidden": showCvCenterCalibration ? true : undefined, children: featureGroups.map((group) => (_jsxs(motion.div, { style: styles.group, variants: itemVariants, children: [_jsx("h2", { style: styles.groupTitle, children: group.title }), _jsx("div", { style: styles.featuresList, children: group.features.map((feature) => {
                                 const isActive = activeModes.includes(feature.id);
                                 return (_jsxs(motion.div, { style: {
                                         ...styles.featureCard,
@@ -139,7 +245,10 @@ export default function Home() {
                                                         ...styles.featureIcon,
                                                         ...(isActive ? styles.featureIconActive : {}),
                                                     }, animate: isActive ? { scale: [1, 1.05, 1] } : {}, transition: { duration: 0.3 }, children: feature.icon }), _jsxs("div", { style: styles.featureText, children: [_jsx("span", { style: styles.featureName, children: feature.name }), _jsx("p", { style: styles.featureDescription, children: feature.description })] })] }), _jsx(Toggle, { active: isActive })] }, feature.id));
-                            }) })] }, group.title))) })] }));
+                            }) })] }, group.title))) }), _jsxs(motion.section, { style: {
+                    ...styles.instructionsPanel,
+                    ...(showCvCenterCalibration ? styles.blockedInteractiveLayer : {}),
+                }, variants: itemVariants, "data-snap-ignore": showCvCenterCalibration ? "true" : undefined, "aria-hidden": showCvCenterCalibration ? true : undefined, children: [_jsxs("div", { style: styles.instructionsHeader, children: [_jsx("span", { style: styles.instructionsEyebrow, children: "Start Here" }), _jsx("h2", { style: styles.instructionsTitle, children: "Why Conduit exists and how to use it" }), _jsx("p", { style: styles.instructionsLead, children: "Conduit is built to give full computer access to people who cannot rely on conventional mouse and keyboard input. It translates gaze, EEG, voice, and sign signals into a shared canonical control event format so the system can safely fuse them in real time." })] }), _jsxs("div", { style: styles.instructionsGrid, children: [_jsxs("article", { style: styles.instructionsCard, children: [_jsx("h3", { style: styles.instructionsCardTitle, children: "Quick Start Flow" }), _jsx("ol", { style: styles.instructionsList, children: quickStartSteps.map((step) => (_jsx("li", { style: styles.instructionsListItem, children: step }, step))) })] }), _jsxs("article", { style: styles.instructionsCard, children: [_jsx("h3", { style: styles.instructionsCardTitle, children: "Modality Guide" }), _jsx("div", { style: styles.modalityList, children: modalityGuide.map((item) => (_jsxs("div", { style: styles.modalityItem, children: [_jsx("div", { style: styles.modalityIcon, children: item.icon }), _jsxs("div", { style: styles.modalityContent, children: [_jsx("span", { style: styles.modalityName, children: item.name }), _jsx("p", { style: styles.modalityHint, children: item.hint })] })] }, item.name))) })] }), _jsxs("article", { style: styles.instructionsCard, children: [_jsx("h3", { style: styles.instructionsCardTitle, children: "Data + Safety Contract" }), _jsx("ul", { style: styles.instructionsList, children: architectureGuidance.map((point) => (_jsx("li", { style: styles.instructionsListItem, children: point }, point))) })] })] })] }), showCvCenterCalibration ? (_jsx("div", { style: styles.cvModalBackdrop, role: "dialog", "aria-modal": "true", "data-snap-modal-root": "true", children: _jsxs("div", { style: styles.cvModalCard, children: [_jsxs("div", { style: styles.cvModalHeader, children: [_jsxs("div", { style: styles.cvModalHeaderText, children: [_jsx("h3", { style: styles.cvModalTitle, children: "Center Eye Alignment" }), _jsx("p", { style: styles.cvModalLead, children: "Recalibrate center gaze before re-enabling live cursor control." })] }), _jsx("button", { type: "button", onClick: () => void closeCvCalibration(), style: styles.cvModalCloseButton, children: "Close" })] }), _jsx(CVCursorCalibrationCenter, { autoStart: true, onCenterLocked: handleCvCalibrationLocked })] }) })) : null] }));
 }
 const Toggle = ({ active }) => {
     return (_jsx("div", { style: {
@@ -221,28 +330,31 @@ const styles = {
     instructionsPanel: {
         display: 'flex',
         flexDirection: 'column',
-        gap: '24px',
-        padding: 'clamp(18px, 3vw, 28px)',
-        borderRadius: '28px',
+        gap: '16px',
+        padding: 'clamp(12px, 2.2vw, 18px)',
+        borderRadius: '22px',
         border: '1px solid var(--border)',
         background: 'linear-gradient(145deg, var(--bg-secondary), var(--bg-primary))',
+        maxWidth: '1160px',
+        width: '100%',
+        alignSelf: 'center',
     },
     instructionsHeader: {
         display: 'flex',
         flexDirection: 'column',
-        gap: '8px',
-        maxWidth: '900px',
+        gap: '6px',
+        maxWidth: '720px',
     },
     instructionsEyebrow: {
-        fontSize: '12px',
+        fontSize: '11px',
         fontWeight: 700,
-        letterSpacing: '0.1em',
+        letterSpacing: '0.08em',
         textTransform: 'uppercase',
         color: '#FF2D8D',
     },
     instructionsTitle: {
         margin: 0,
-        fontSize: 'clamp(22px, 3.4vw, 30px)',
+        fontSize: 'clamp(18px, 2.3vw, 24px)',
         fontWeight: 700,
         color: 'var(--text-primary)',
         lineHeight: 1.2,
@@ -250,59 +362,59 @@ const styles = {
     instructionsLead: {
         margin: 0,
         color: 'var(--text-secondary)',
-        fontSize: '15px',
-        lineHeight: 1.7,
-        maxWidth: '880px',
+        fontSize: '13px',
+        lineHeight: 1.55,
+        maxWidth: '700px',
     },
     instructionsGrid: {
         display: 'grid',
-        gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))',
-        gap: '16px',
+        gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
+        gap: '12px',
     },
     instructionsCard: {
         display: 'flex',
         flexDirection: 'column',
-        gap: '14px',
-        padding: '20px',
-        borderRadius: '20px',
+        gap: '10px',
+        padding: '14px',
+        borderRadius: '16px',
         border: '1px solid var(--border)',
         background: 'var(--bg-primary)',
         minHeight: '100%',
     },
     instructionsCardTitle: {
         margin: 0,
-        fontSize: '15px',
-        letterSpacing: '0.06em',
+        fontSize: '13px',
+        letterSpacing: '0.04em',
         textTransform: 'uppercase',
         color: 'var(--text-primary)',
         fontWeight: 700,
     },
     instructionsList: {
         margin: 0,
-        paddingLeft: '18px',
+        paddingLeft: '16px',
         display: 'flex',
         flexDirection: 'column',
-        gap: '10px',
+        gap: '7px',
     },
     instructionsListItem: {
         color: 'var(--text-secondary)',
-        fontSize: '14px',
-        lineHeight: 1.5,
+        fontSize: '12px',
+        lineHeight: 1.45,
     },
     modalityList: {
         display: 'flex',
         flexDirection: 'column',
-        gap: '12px',
+        gap: '8px',
     },
     modalityItem: {
         display: 'flex',
         alignItems: 'flex-start',
-        gap: '10px',
+        gap: '8px',
     },
     modalityIcon: {
-        width: '28px',
-        height: '28px',
-        borderRadius: '10px',
+        width: '24px',
+        height: '24px',
+        borderRadius: '8px',
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
@@ -313,10 +425,10 @@ const styles = {
     modalityContent: {
         display: 'flex',
         flexDirection: 'column',
-        gap: '4px',
+        gap: '2px',
     },
     modalityName: {
-        fontSize: '14px',
+        fontSize: '13px',
         fontWeight: 700,
         color: 'var(--text-primary)',
         lineHeight: 1.3,
@@ -324,8 +436,8 @@ const styles = {
     modalityHint: {
         margin: 0,
         color: 'var(--text-secondary)',
-        fontSize: '13px',
-        lineHeight: 1.5,
+        fontSize: '12px',
+        lineHeight: 1.4,
     },
     grid: {
         display: 'grid',
@@ -428,6 +540,69 @@ const styles = {
     },
     toggleThumbActive: {
         left: '22px',
+    },
+    cvModalBackdrop: {
+        position: 'fixed',
+        inset: 0,
+        background: 'rgba(8, 12, 18, 0.7)',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        padding: '20px',
+        zIndex: 1200,
+        backdropFilter: 'blur(4px)',
+        WebkitBackdropFilter: 'blur(4px)',
+    },
+    cvModalCard: {
+        width: 'min(760px, 100%)',
+        maxHeight: '92vh',
+        overflowY: 'auto',
+        borderRadius: '20px',
+        border: '1px solid var(--border)',
+        background: 'var(--bg-primary)',
+        boxShadow: '0 30px 80px rgba(0, 0, 0, 0.34)',
+        padding: '18px',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: '12px',
+    },
+    cvModalHeader: {
+        display: 'flex',
+        alignItems: 'flex-start',
+        justifyContent: 'space-between',
+        gap: '12px',
+    },
+    cvModalHeaderText: {
+        display: 'flex',
+        flexDirection: 'column',
+        gap: '4px',
+    },
+    cvModalTitle: {
+        margin: 0,
+        fontSize: '18px',
+        fontWeight: 700,
+        color: 'var(--text-primary)',
+    },
+    cvModalLead: {
+        margin: 0,
+        fontSize: '13px',
+        color: 'var(--text-secondary)',
+        lineHeight: 1.4,
+    },
+    cvModalCloseButton: {
+        height: '36px',
+        padding: '0 12px',
+        borderRadius: '10px',
+        border: '1px solid var(--border)',
+        background: 'transparent',
+        color: 'var(--text-secondary)',
+        fontWeight: 700,
+        cursor: 'pointer',
+        flexShrink: 0,
+    },
+    blockedInteractiveLayer: {
+        pointerEvents: 'none',
+        userSelect: 'none',
     },
 };
 // Add pulse animation to CSS

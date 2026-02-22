@@ -26,6 +26,12 @@ type CameraStatusPayload = {
   } | null;
 };
 
+type CVCursorCalibrationCenterProps = {
+  autoStart?: boolean;
+  onCenterLocked?: () => void;
+  onCalibrationStateChange?: (isCalibrating: boolean) => void;
+};
+
 async function callCvApi(path: string, init?: RequestInit): Promise<Response> {
   const controller = new AbortController();
   const timeout = window.setTimeout(() => controller.abort(), 2500);
@@ -114,7 +120,11 @@ function describeCameraStatus(raw: string | undefined): string {
   return raw.replace(/_/g, " ");
 }
 
-export function CVCursorCalibrationCenter() {
+export function CVCursorCalibrationCenter({
+  autoStart = false,
+  onCenterLocked,
+  onCalibrationStateChange,
+}: CVCursorCalibrationCenterProps = {}) {
   const [isCalibrating, setIsCalibrating] = React.useState(false);
   const [backendReachable, setBackendReachable] = React.useState(false);
   const [isOnCenter, setIsOnCenter] = React.useState(false);
@@ -126,9 +136,12 @@ export function CVCursorCalibrationCenter() {
   const [lastFrameLoadMs, setLastFrameLoadMs] = React.useState(0);
   const [centerLockProgress, setCenterLockProgress] = React.useState(0);
   const refreshCooldownRef = React.useRef(0);
-  const lastBackendFrameMsRef = React.useRef(0);
+  const lastBackendFrameMarkerRef = React.useRef<number | null>(null);
+  const lastBackendFrameObservedAtMsRef = React.useRef(0);
   const centerReadySinceMsRef = React.useRef<number | null>(null);
   const statusErrorStreakRef = React.useRef(0);
+  const autoStartAttemptedRef = React.useRef(false);
+  const centerLockNotifiedRef = React.useRef(false);
 
   const refreshStream = React.useCallback((reason: string) => {
     const now = Date.now();
@@ -152,8 +165,10 @@ export function CVCursorCalibrationCenter() {
     setLastFrameLoadMs(0);
     setCenterLockProgress(0);
     centerReadySinceMsRef.current = null;
+    centerLockNotifiedRef.current = false;
     statusErrorStreakRef.current = 0;
-    lastBackendFrameMsRef.current = 0;
+    lastBackendFrameMarkerRef.current = null;
+    lastBackendFrameObservedAtMsRef.current = 0;
     let launchDebugMessage = "";
     try {
       setStatusMessage("Launching CV backend...");
@@ -196,6 +211,7 @@ export function CVCursorCalibrationCenter() {
     setStatusMessage("Calibration paused.");
     setCenterLockProgress(0);
     centerReadySinceMsRef.current = null;
+    centerLockNotifiedRef.current = false;
     statusErrorStreakRef.current = 0;
     try {
       await setCvState({
@@ -223,7 +239,11 @@ export function CVCursorCalibrationCenter() {
         }
         statusErrorStreakRef.current = 0;
         if (typeof payload.camera_last_valid_frame_ms === "number") {
-          lastBackendFrameMsRef.current = payload.camera_last_valid_frame_ms;
+          const marker = payload.camera_last_valid_frame_ms;
+          if (marker !== lastBackendFrameMarkerRef.current) {
+            lastBackendFrameMarkerRef.current = marker;
+            lastBackendFrameObservedAtMsRef.current = Date.now();
+          }
         }
         const cameraReady = Boolean(payload.camera_ready);
         if (cameraReady) {
@@ -235,7 +255,10 @@ export function CVCursorCalibrationCenter() {
             return;
           }
           const nowMs = Date.now();
-          const backendFrameAge = nowMs - (lastBackendFrameMsRef.current || nowMs);
+          const backendFrameAge =
+            lastBackendFrameObservedAtMsRef.current > 0
+              ? nowMs - lastBackendFrameObservedAtMsRef.current
+              : 0;
           if (backendFrameAge > 1800) {
             centerReadySinceMsRef.current = null;
             setCenterLockProgress(0);
@@ -385,11 +408,37 @@ export function CVCursorCalibrationCenter() {
 
   const showOverlay = isCalibrating && (phase !== "ready" || !backendReachable);
 
+  React.useEffect(() => {
+    if (!autoStart || autoStartAttemptedRef.current) {
+      return;
+    }
+    autoStartAttemptedRef.current = true;
+    void startCalibration();
+  }, [autoStart]);
+
+  React.useEffect(() => {
+    if (!centerLocked || centerLockNotifiedRef.current) {
+      return;
+    }
+    centerLockNotifiedRef.current = true;
+    onCenterLocked?.();
+  }, [centerLocked, onCenterLocked]);
+
+  React.useEffect(() => {
+    onCalibrationStateChange?.(isCalibrating && !centerLocked);
+  }, [isCalibrating, centerLocked, onCalibrationStateChange]);
+
+  React.useEffect(() => {
+    return () => {
+      onCalibrationStateChange?.(false);
+    };
+  }, [onCalibrationStateChange]);
+
   return (
     <div style={styles.container}>
       <div style={styles.headerBlock}>
         <p style={styles.subtitle}>
-          Keep your face centered. Press C anytime during this step to request center calibration.
+          Keep your face centered. Press C anytime to re-center.
         </p>
       </div>
 
@@ -484,14 +533,14 @@ export function CVCursorCalibrationCenter() {
 
 const BUTTON_WIDTH = 180;
 const BUTTON_HEIGHT = 42;
-const PREVIEW_WIDTH = 520;
+const PREVIEW_WIDTH = 500;
 
 const styles: Record<string, React.CSSProperties> = {
   container: {
     display: "flex",
     flexDirection: "column",
     alignItems: "center",
-    gap: 16,
+    gap: 12,
     width: "100%",
   },
   headerBlock: {
@@ -499,19 +548,19 @@ const styles: Record<string, React.CSSProperties> = {
     textAlign: "center",
   },
   subtitle: {
-    margin: "8px 0 0 0",
-    fontSize: 14,
+    margin: "4px 0 0 0",
+    fontSize: 13,
     color: "var(--text-secondary)",
   },
   previewCard: {
     width: PREVIEW_WIDTH,
-    borderRadius: 20,
+    borderRadius: 18,
     border: "1px solid var(--border)",
     background: "var(--bg-secondary)",
-    padding: 16,
+    padding: 14,
   },
   previewInner: {
-    height: 280,
+    height: 220,
     borderRadius: 16,
     border: "1px solid var(--border)",
     background:
@@ -549,7 +598,7 @@ const styles: Record<string, React.CSSProperties> = {
     left: 12,
     right: 12,
     top: 12,
-    minHeight: 42,
+    minHeight: 38,
     borderRadius: 12,
     background: "rgba(10, 15, 20, 0.82)",
     border: "1px solid rgba(255,255,255,0.15)",
@@ -557,7 +606,7 @@ const styles: Record<string, React.CSSProperties> = {
     display: "flex",
     alignItems: "center",
     gap: 10,
-    padding: "10px 12px",
+    padding: "8px 10px",
     zIndex: 2,
   },
   statusOverlayText: {
@@ -655,8 +704,8 @@ const styles: Record<string, React.CSSProperties> = {
   },
   statusText: {
     margin: 0,
-    minHeight: 22,
-    fontSize: 13,
+    minHeight: 20,
+    fontSize: 12,
     color: "var(--text-secondary)",
     textAlign: "center",
     width: PREVIEW_WIDTH,

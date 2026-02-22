@@ -10,7 +10,7 @@ export default function Shell({ children }) {
             console.log("Initial overlay mode in Shell:", mode);
             setIsOverlay(mode);
         });
-        window.electron?.onOverlayModeChanged((mode) => {
+        window.electron?.onOverlayModeChanged?.((mode) => {
             console.log("Overlay mode changed in Shell:", mode);
             setIsOverlay(mode);
         });

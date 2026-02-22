@@ -13,22 +13,50 @@ import {
 import { enableASL, disableASL, getASLReady } from "../lib/aslcv";
 import { enableVoice, disableVoice, getVoiceReady } from "../lib/voicetts";
 
+const SIGN_TEXT_PREFERENCE_KEY = "conduit-modality-intent-sign-text";
+
+function getModalityPreference(): boolean | null {
+  if (typeof window === "undefined" || !window.localStorage) {
+    return null;
+  }
+  const value = localStorage.getItem(SIGN_TEXT_PREFERENCE_KEY);
+  if (value === null) {
+    return null;
+  }
+  return value === "1";
+}
+
+function setModalityPreference(enabled: boolean): void {
+  if (typeof window === "undefined" || !window.localStorage) {
+    return;
+  }
+  localStorage.setItem(SIGN_TEXT_PREFERENCE_KEY, enabled ? "1" : "0");
+}
+
 export default function OverlayBar() {
   const isMacOS =
     typeof navigator !== "undefined" &&
     /Mac|iPhone|iPad|iPod/.test(navigator.platform);
   const [signalStrength] = useState(98);
   const [leftJawSignal, setLeftJawSignal] = useState(false);
-  const [middleJawSignal, setMiddleJawSignal] = useState(false);
   const [rightJawSignal, setRightJawSignal] = useState(false);
   const [voiceOn, setVoiceOn] = useState(false);
   const [opticOpen, setOpticOpen] = useState(false);
   const [aslOn, setAslOn] = useState(false);
+  const [isSwitchingOverlay, setIsSwitchingOverlay] = useState(false);
 
   // Sync toggles with real API state on mount
   useEffect(() => {
-    getVoiceReady().then(setVoiceOn);
-    getASLReady().then(setAslOn);
+    void (async () => {
+      const [voiceReady, aslReady] = await Promise.all([
+        getVoiceReady(),
+        getASLReady(),
+      ]);
+      setVoiceOn(voiceReady);
+
+      const userIntent = getModalityPreference();
+      setAslOn(userIntent === null ? false : userIntent && aslReady);
+    })();
   }, []);
 
   const toggleVoice = async () => {
@@ -49,6 +77,7 @@ export default function OverlayBar() {
   const toggleASL = async () => {
     const next = !aslOn;
     setAslOn(next);
+    setModalityPreference(next);
     try {
       if (next) {
         await enableASL();
@@ -58,6 +87,7 @@ export default function OverlayBar() {
     } catch (e) {
       console.error("ASL toggle failed:", e);
       setAslOn(!next);
+      setModalityPreference(!next);
     }
   };
 
@@ -75,18 +105,22 @@ export default function OverlayBar() {
     }, 2500);
     return () => clearInterval(t);
   }, []);
-  useEffect(() => {
-    const t = setInterval(() => {
-      setMiddleJawSignal((s) => !s);
-    }, 3000);
-    return () => clearInterval(t);
-  }, []);
 
   const exitOverlay = async () => {
+    if (isSwitchingOverlay) {
+      return;
+    }
+    if (typeof window.electron?.toggleOverlay !== "function") {
+      console.error("Overlay toggle is unavailable in this runtime.");
+      return;
+    }
+    setIsSwitchingOverlay(true);
     try {
-      await window.electron?.toggleOverlay({ targetPath: "/home" });
+      await window.electron.toggleOverlay({ targetPath: "/home" });
     } catch (e) {
       console.error("Toggle overlay:", e);
+    } finally {
+      setIsSwitchingOverlay(false);
     }
   };
 
@@ -108,11 +142,6 @@ export default function OverlayBar() {
           label="L-JAW"
           active={leftJawSignal}
           crescentSide="right"
-        />
-        <JawButton
-          label="M-JAW"
-          active={middleJawSignal}
-          size="small"
         />
         <JawButton
           label="R-JAW"
@@ -184,11 +213,15 @@ export default function OverlayBar() {
       <button
         type="button"
         onClick={exitOverlay}
-        style={styles.expandButton}
-        title="Expand to full window"
+        style={{
+          ...styles.expandButton,
+          ...(isSwitchingOverlay ? styles.expandButtonDisabled : {}),
+        }}
+        title={isSwitchingOverlay ? "Switching back to full window..." : "Expand to full window"}
+        disabled={isSwitchingOverlay}
       >
         <Maximize2 size={18} />
-        <span>Expand</span>
+        <span>{isSwitchingOverlay ? "Switching..." : "Expand"}</span>
       </button>
     </div>
   );
@@ -198,26 +231,21 @@ function JawButton({
   label,
   active,
   crescentSide,
-  size = "large",
 }: {
   label: string;
   active: boolean;
   crescentSide?: "left" | "right";
-  size?: "large" | "small";
 }) {
-  const isSmall = size === "small";
-
   return (
     <div style={styles.jawButtonWrap}>
       <div
         style={{
           ...styles.jawCircle,
-          ...(isSmall ? styles.jawCircleSmall : {}),
           ...(active ? styles.jawCircleActive : {}),
         }}
         className={active ? "overlay-jaw-active" : ""}
       >
-        {!isSmall && crescentSide && (
+        {crescentSide && (
           <span
             style={{
               ...styles.crescent,
@@ -225,7 +253,6 @@ function JawButton({
             }}
           />
         )}
-        {isSmall && active && <span style={styles.smallGlow} />}
       </div>
       <span
         style={{
@@ -310,11 +337,6 @@ const styles: Record<string, React.CSSProperties> = {
     justifyContent: "center",
     transition: "box-shadow 0.3s ease, background 0.3s ease",
   },
-  jawCircleSmall: {
-    width: 28,
-    height: 28,
-    background: "#e5e7eb",
-  },
   jawCircleActive: {
     background: "#1e293b",
     boxShadow: "0 0 0 0 rgba(255, 45, 141, 0.4)",
@@ -333,14 +355,6 @@ const styles: Record<string, React.CSSProperties> = {
   crescentRight: {
     right: 4,
     boxShadow: "-4px 0 0 0 #1e293b",
-  },
-  smallGlow: {
-    position: "absolute",
-    width: "100%",
-    height: "100%",
-    borderRadius: "50%",
-    background: "rgba(255, 45, 141, 0.35)",
-    animation: "overlay-jaw-hum 1.2s ease-in-out infinite",
   },
   jawLabel: {
     fontSize: 10,
@@ -426,5 +440,9 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: 13,
     fontWeight: 600,
     cursor: "pointer",
+  },
+  expandButtonDisabled: {
+    opacity: 0.7,
+    cursor: "wait",
   },
 };
