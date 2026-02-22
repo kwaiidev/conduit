@@ -36,12 +36,14 @@ import json
 import os
 import shutil
 import subprocess
+import threading
 import time
 import wave
 import sys
 import re
 from contextlib import asynccontextmanager
 from datetime import datetime
+import pyautogui
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -63,7 +65,7 @@ PORT               = 8766
 ELEVENLABS_API_KEY = os.environ.get("ELEVENLABS_API_KEY", "")
 GOOGLE_API_KEY     = os.environ.get("GOOGLE_API_KEY", "")
 GEMINI_MODEL       = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
-LATENCY_TIMEOUT    = float(os.environ.get("VOICE_LATENCY_TIMEOUT", "5.0"))
+LATENCY_TIMEOUT    = float(os.environ.get("VOICE_LATENCY_TIMEOUT", "15.0"))
 
 SAMPLE_RATE        = 16_000
 CHANNELS           = 1
@@ -90,21 +92,17 @@ def _get_gemini_client() -> genai.Client:
 
 CLEAN_SYSTEM_PROMPT = (
     "You are a transcript-cleaning and command-detection assistant.\n\n"
-
     "## Output format\n"
     "Always respond with exactly this structure, using the delimiters literally:\n\n"
-
     "For plain dictation:\n"
     "TYPE: text\n"
     "VALUE: <cleaned text>\n\n"
-
     "For commands (when transcript starts with 'Command'):\n"
     "TYPE: command\n"
     "VALUE: <cleaned intent, trigger word removed>\n"
     "CODE:\n"
     "<python code, multiple lines allowed>\n"
     "END_CODE\n\n"
-
     "## Cleaning rules\n"
     "  1. Remove noise annotations: [music], [applause], [laughter], [inaudible], etc.\n"
     "  2. Remove filler words: um, uh, er, ah, you know, like (filler), so (opener), basically, literally (filler).\n"
@@ -117,24 +115,65 @@ CLEAN_SYSTEM_PROMPT = (
     "'exclamation mark'→!, 'question mark'→?, 'equals sign'→=, 'plus sign'→+.\n"
     "  5. Do NOT paraphrase or summarise.\n"
     "  6. If empty or only noise, output: TYPE: text\nVALUE:\n\n"
-
     "## Command detection\n"
     "Use TYPE: command ONLY when the transcript starts with 'Command' (case-insensitive). "
+    "Strip 'Command' plus any following comma, dash, colon, or whitespace before interpreting intent. "
+    "If the transcript does NOT begin with the word 'Command', you MUST output TYPE: text regardless "
+    "of what the rest of the transcript says. Phrases like 'open', 'remind', 'every', 'launch', "
+    "'schedule', 'set', 'play' etc. do NOT trigger command mode on their own — only the explicit "
+    "'Command' trigger word does.\n\n"
     "Strip 'Command' plus any following comma, dash, colon, or whitespace before interpreting intent.\n\n"
     "Examples:\n"
-    "  'Command open Discord'           → launch Discord\n"
-    "  'Command change my volume to 40' → set system volume to 40\n"
-    "  'Command open Chrome'            → launch Chrome\n"
-    "  'Command open the terminal'      → launch terminal\n\n"
-
+    "  'Command open Discord'                                     → launch Discord\n"
+    "  'Command change my volume to 40'                          → set system volume to 40\n"
+    "  'Command open Chrome'                                     → launch Chrome\n"
+    "  'Command open the terminal'                               → launch terminal\n"
+    "  'Command remind me in 10 minutes to drink water'          → reminder in 10 minutes\n"
+    "  'Command remind me at 3pm to call John'                   → reminder at 3:00 PM\n"
+    "  'Command every 30 minutes open a new Chrome tab'          → repeated task on interval\n"
+    "  'Command in 2 hours lower the volume to 20'               → delayed one-shot task\n"
+    "  'Command every morning at 9am open Spotify'               → daily scheduled task\n\n"
     "## Code rules\n"
     "Write a self-contained Python snippet between CODE: and END_CODE. "
     "It runs via exec() so no top-level return statements. "
-    "Use subprocess, os, sys, shutil, webbrowser, pathlib as needed. "
+    "Use subprocess, os, sys, shutil, webbrowser, pathlib, pyautogui as needed. "
+    "Use subprocess, os, sys, shutil, webbrowser, pathlib, datetime, time as needed. "
     "Detect OS via sys.platform ('win32', 'darwin', 'linux'). "
     "For volume: use 'amixer' on Linux, 'osascript' on mac, 'nircmd' on Windows. "
     "Use subprocess.Popen([...], start_new_session=True) for GUI apps. "
-    "Write real working code — no placeholders, no comments unless necessary."
+    "Write real working code — no placeholders, no comments unless necessary.\n\n"
+    "## Scheduling and timing rules\n"
+    "Whenever a command involves a delay, a specific future time, an interval, or recurrence, "
+    "spawn the entire sleeping/looping logic in a background process using:\n"
+    "  subprocess.Popen([sys.executable, '-c', '<escaped one-liner or script>'], start_new_session=True)\n"
+    "Never use threading or asyncio — always a separate process so the main process returns immediately.\n\n"
+    "There are three scheduling patterns. Detect which applies and implement accordingly:\n\n"
+    "  ONE-SHOT DELAY — 'in X minutes/hours', 'at HH:MM', 'at 3pm', etc.\n"
+    "    - Get current time with datetime.datetime.now().\n"
+    "    - Calculate seconds_to_wait precisely from now to the target moment.\n"
+    "    - If the target clock time has already passed today, roll over to tomorrow.\n"
+    "    - Background script: time.sleep(seconds_to_wait); <do the thing>\n\n"
+    "  INTERVAL / REPEAT — 'every X minutes/hours', 'every 30 seconds', etc.\n"
+    "    - Background script: a while True loop with time.sleep(interval_seconds) between iterations.\n"
+    "    - Each iteration performs the requested action.\n"
+    "    - The loop runs indefinitely until the process is killed.\n\n"
+    "  SCHEDULED REPEAT — 'every day at 9am', 'every Monday at noon', etc.\n"
+    "    - Background script: a while True loop that on each iteration calculates seconds until the "
+    "next occurrence of the target time/weekday, sleeps that long, performs the action, then repeats.\n\n"
+    "## Notification rules (for reminders and alerts)\n"
+    "When the task is a reminder or the user wants a visible alert, trigger a system notification "
+    "using the OS-appropriate method inside the background script:\n"
+    "  Linux:   subprocess.run(['notify-send', 'Reminder', '<message>'])\n"
+    "  macOS:   subprocess.run(['osascript', '-e', 'display notification \"<message>\" with title \"Reminder\"'])\n"
+    "  Windows: subprocess.run(['powershell', '-Command', "
+    "'[System.Reflection.Assembly]::LoadWithPartialName(\"System.Windows.Forms\"); "
+    "[System.Windows.Forms.MessageBox]::Show(\"<message>\", \"Reminder\")'])\n"
+    "The reminder message must be the exact text the user asked to be reminded about.\n\n"
+    "## Confirmation\n"
+    "After spawning the background process, always print a human-readable confirmation, e.g.:\n"
+    "  print('Reminder set for 3:00 PM.')\n"
+    "  print('Task scheduled: open Chrome every 30 minutes.')\n"
+    "  print('Volume will be lowered to 20 in 2 hours.')\n"
 )
 
 # ---------------------------------------------------------------------------
@@ -179,7 +218,7 @@ def _parse_gemini_response(text: str) -> dict:
 
     type_match = re.search(r"^TYPE:\s*(.+)$", text, re.MULTILINE)
     value_match = re.search(r"^VALUE:\s*(.*)$", text, re.MULTILINE)
-    code_match = re.search(r"^CODE:\s*\n(.*?)^END_CODE", text, re.MULTILINE | re.DOTALL)
+    code_match = re.search(r"^CODE:\s*\n(.*?)(?:^END_CODE|\Z)", text, re.MULTILINE | re.DOTALL)
 
     if type_match:
         result["type"] = type_match.group(1).strip().lower()
@@ -295,21 +334,40 @@ class VoiceAgent:
         if not self.is_recording:
             return {"success": False, "reason": "not recording"}
 
+        # Stop the callback first so no new chunks arrive during teardown
         self.is_recording = False
-        if self._stream:
-            self._stream.stop()
-            self._stream.close()
-            self._stream = None
+
+        # Grab a snapshot of chunks before touching the stream
+        chunks = list(self._audio_chunks)
+        self._audio_chunks = []
+
+        stream = self._stream
+        self._stream = None
+        if stream:
+            # Close in a daemon thread — stream.stop() is a blocking PortAudio
+            # call and must never run on the async event loop thread.
+            def _close_stream():
+                try:
+                    stream.stop()
+                    stream.close()
+                except Exception as e:
+                    print(f"[{self._ts()}] Stream close error (non-fatal): {e}")
+            threading.Thread(target=_close_stream, daemon=True).start()
 
         duration = round(time.monotonic() - self._record_start, 2)
-        print(f"[{self._ts()}] PTT stop — {duration}s, {len(self._audio_chunks)} chunks")
+        print(f"[{self._ts()}] PTT stop — {duration}s, {len(chunks)} chunks")
 
-        if not self._audio_chunks or duration < 0.2:
+        if not chunks or duration < 0.2:
             event = self._make_noop("audio_too_short")
             self._schedule_broadcast(event)
             return {"success": False, "reason": "audio too short"}
 
-        audio = np.concatenate(self._audio_chunks, axis=0)
+        try:
+            audio = np.concatenate(chunks, axis=0)
+        except Exception as e:
+            print(f"[{self._ts()}] Audio concat error: {e}")
+            return {"success": False, "reason": "audio processing error"}
+
         self._processing        = True
         self._last_request_time = time.monotonic()
 
@@ -449,10 +507,11 @@ class VoiceAgent:
                 config=genai_types.GenerateContentConfig(
                     system_instruction=CLEAN_SYSTEM_PROMPT,
                     temperature=0.0,
-                    max_output_tokens=512,
+                    max_output_tokens=4096,
                 ),
             )
             text = (response.text or "").strip()
+            print(f"[Gemini raw response]\n{text}\n[/Gemini raw response]")
             return _parse_gemini_response(text)
 
         loop = asyncio.get_running_loop()
