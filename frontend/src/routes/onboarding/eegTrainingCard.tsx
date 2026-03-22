@@ -13,9 +13,10 @@ type EegTrainingCardProps = {
 };
 
 const CUE_ASSETS = {
-  left: {
-    light: leftLight,
-    dark: leftDark,
+  left:
+  {
+    light: rightLight,
+    dark: rightDark,
     alt: "Left jaw clench EEG cue",
   },
   right: {

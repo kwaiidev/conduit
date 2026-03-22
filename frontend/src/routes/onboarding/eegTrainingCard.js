@@ -8,7 +8,8 @@ import leftLight from "../../assets/leftLight.gif";
 import rightDark from "../../assets/rightDark.gif";
 import rightLight from "../../assets/rightLight.gif";
 const CUE_ASSETS = {
-    left: {
+    left:
+    {
         light: leftLight,
         dark: leftDark,
         alt: "Left jaw clench EEG cue",
